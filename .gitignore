@@ -1,0 +1,19 @@
+# Antigravity Starter Kit - Git Ignore Rules
+# Ignore everything by default
+*
+
+# Explicitly whitelist only the portable Starter Kit files
+!.gitignore
+!GEMINI.md
+!README.md
+
+!agents/
+!agents/COMMON_INSTRUCTIONS.md
+!agents/orchestrator/
+!agents/orchestrator/AGENT.md
+!agents/agent-default/
+!agents/agent-default/AGENT.md
+
+!memory/
+!memory/mem
+!memory/CORE.template.md
