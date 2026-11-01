@@ -496,5 +496,147 @@ class TestControllerAndCliJson(unittest.TestCase):
         self.assertNotIn("Traceback", res_json.stderr)
 
 
+class TestConcurrencyAndStress(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.test_dir, "stress_archival.db")
+        self.lock_path = os.path.join(self.test_dir, "stress.lock")
+        self.clock = UtcClockAdapter()
+        self.repo = SqliteMemoryRepository(self.db_path)
+        self.repo.initialize([], self.clock.now_iso())
+        self.repo.close()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_multiprocess_concurrent_upsert_and_versioning(self):
+        worker_code = f"""
+import sys
+import os
+from importlib.machinery import SourceFileLoader
+import importlib.util
+
+MEM_PATH = '{MEM_PATH}'
+loader = SourceFileLoader('mem_engine', MEM_PATH)
+spec = importlib.util.spec_from_loader('mem_engine', loader)
+mem_engine = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mem_engine)
+
+worker_id = int(sys.argv[1])
+db_path = sys.argv[2]
+iterations = int(sys.argv[3])
+repo = mem_engine.SqliteMemoryRepository(db_path)
+clock = mem_engine.UtcClockAdapter()
+
+for j in range(iterations):
+    # Distinct topic for each worker and iteration
+    repo.upsert('default', 'fact', f'worker_{{worker_id}}_task_{{j}}', f'content {{worker_id}} {{j}}', 'stress,distinct', None, clock.now_iso())
+    # Contended shared topic updated concurrently
+    repo.upsert('default', 'learning', 'shared-contended-topic', f'update from worker {{worker_id}} step {{j}}', 'stress,contended', None, clock.now_iso(), source=f'worker-{{worker_id}}')
+repo.close()
+"""
+        worker_script = os.path.join(self.test_dir, "worker_upsert.py")
+        with open(worker_script, "w", encoding="utf-8") as f:
+            f.write(worker_code)
+
+        num_workers = 8
+        iterations_per_worker = 5
+        total_expected_shared = num_workers * iterations_per_worker
+        total_expected_distinct = num_workers * iterations_per_worker
+
+        procs = [
+            subprocess.Popen([sys.executable, worker_script, str(i), self.db_path, str(iterations_per_worker)])
+            for i in range(num_workers)
+        ]
+        exit_codes = [p.wait() for p in procs]
+
+        # All processes must exit successfully with 0
+        for idx, code in enumerate(exit_codes):
+            self.assertEqual(code, 0, f"Worker {idx} failed with exit code {code}")
+
+        # Verify database integrity and state
+        verify_repo = SqliteMemoryRepository(self.db_path)
+        conn = verify_repo._get_conn()
+
+        integrity = conn.execute("PRAGMA integrity_check;").fetchone()[0]
+        self.assertEqual(integrity, "ok", "Database integrity check failed after concurrent writes")
+
+        distinct_count = conn.execute(
+            "SELECT count(*) FROM memories WHERE topic != 'shared-contended-topic' AND namespace = 'default'"
+        ).fetchone()[0]
+        self.assertEqual(distinct_count, total_expected_distinct)
+
+        shared_row = conn.execute(
+            "SELECT * FROM memories WHERE topic = 'shared-contended-topic' AND namespace = 'default'"
+        ).fetchone()
+        self.assertIsNotNone(shared_row)
+        self.assertEqual(shared_row["version"], total_expected_shared)
+
+        history_count = conn.execute(
+            "SELECT count(*) FROM memory_history WHERE topic = 'shared-contended-topic' AND namespace = 'default'"
+        ).fetchone()[0]
+        self.assertEqual(history_count, total_expected_shared - 1)
+
+        fts_count = conn.execute(
+            "SELECT count(*) FROM memories_fts WHERE namespace = 'default'"
+        ).fetchone()[0]
+        self.assertEqual(fts_count, total_expected_distinct + 1)
+
+        verify_repo.close()
+
+    def test_multiprocess_file_lock_mutual_exclusion(self):
+        counter_file = os.path.join(self.test_dir, "counter.txt")
+        with open(counter_file, "w", encoding="utf-8") as f:
+            f.write("0")
+
+        worker_lock_code = f"""
+import sys
+import os
+import time
+from importlib.machinery import SourceFileLoader
+import importlib.util
+
+MEM_PATH = '{MEM_PATH}'
+loader = SourceFileLoader('mem_engine', MEM_PATH)
+spec = importlib.util.spec_from_loader('mem_engine', loader)
+mem_engine = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mem_engine)
+
+lock_path = sys.argv[1]
+counter_file = sys.argv[2]
+iterations = int(sys.argv[3])
+
+for _ in range(iterations):
+    with mem_engine.file_lock(lock_path):
+        with open(counter_file, 'r+') as f:
+            val = int(f.read().strip())
+            time.sleep(0.002)  # small delay to induce race conditions if locking is defective
+            f.seek(0)
+            f.write(str(val + 1))
+            f.truncate()
+"""
+        worker_script = os.path.join(self.test_dir, "worker_lock.py")
+        with open(worker_script, "w", encoding="utf-8") as f:
+            f.write(worker_lock_code)
+
+        num_workers = 8
+        iterations_per_worker = 5
+        expected_final = num_workers * iterations_per_worker
+
+        procs = [
+            subprocess.Popen([sys.executable, worker_script, self.lock_path, counter_file, str(iterations_per_worker)])
+            for _ in range(num_workers)
+        ]
+        exit_codes = [p.wait() for p in procs]
+
+        for idx, code in enumerate(exit_codes):
+            self.assertEqual(code, 0, f"Lock worker {idx} failed with exit code {code}")
+
+        with open(counter_file, "r", encoding="utf-8") as f:
+            final_count = int(f.read().strip())
+
+        self.assertEqual(final_count, expected_final)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@
 - [Visão Geral & Proposta de Valor](#-visão-geral--proposta-de-valor)
 - [Arquitetura do Sistema](#-arquitetura-do-sistema)
 - [Os 7 Tipos de Memória Implementados](#-os-7-tipos-de-memória-implementados)
+- [Walkthrough End-to-End (Ciclo Completo de Execução)](#-walkthrough-end-to-end-ciclo-completo-de-execução)
 - [Estrutura de Arquivos do Starter Kit](#-estrutura-de-arquivos-do-starter-kit)
 - [Instalação Rápida & First-Boot Onboarding](#-instalação-rápida--first-boot-onboarding)
 - [Subagentes Nativos & Criação de Especialistas](#-subagentes-nativos--criação-de-especialistas)
@@ -116,6 +117,69 @@ Inspirado nas arquiteturas de memória cognitiva mais avançadas (como CoALA, Le
 | **5** | **Retrieval Memory** | Virtual Table `memories_fts` (FTS5 BM25 Normalizado) | Busca híbrida com tokenizador `unicode61 remove_diacritics 2` e pontuação **matematicamente normalizada** (`MAX(0.0001, -1.0 * bm25(memories_fts, 5.0, 1.0, 3.0, 0.5))`), corrigindo a inversão de sinal nativa do SQLite. Aplica pesos calibrados (tópico 5.0, tags 3.0, conteúdo 1.0, namespace 0.5), boost de popularidade (`access_count`), decaimento temporal, expansão de sinônimos (`mem syn` / `syn-list`) e integração programática via flag `--json`. |
 | **6** | **Parametric Memory** | Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit` no **Gemini 4 Argon**) | Uso otimizado da inteligência interna dos modelos LLM, evitando instruções redundantes e roteando subtarefas de acordo com o esforço cognitivo necessário. Quando a sessão principal roda em **Gemini 4 Argon**, passar `Model: "inherit"` direciona subtarefas de fronteira e extrema complexidade diretamente para o **Gemini 4 Argon**. Prompts M2M telegráficos. |
 | **7** | **Prospective Memory** | Tabela `prospective_tasks` (`defer`, `due`, `done`) | Fila persistente de intenções futuras, pendências e gatilhos contextuais (com documentação de tentativas prévias e dead-ends). Dispara alertas reativos automáticos sempre que um agente consulta um namespace com tarefas pendentes em `mem search` ou `mem get`. Suporta listagem em formato estruturado via `mem due --json`. |
+
+---
+
+## 🔄 Walkthrough End-to-End (Ciclo Completo de Execução)
+
+Para ilustrar o ecossistema multi-agente operando na prática, veja o ciclo completo de ponta a ponta durante uma requisição técnica:
+
+### Passo 1 — Requisição do Usuário & Discovery Read-Only Leve
+O usuário envia uma solicitação no chat:
+> *"Adicione resiliência com pool assíncrono de conexões e retry exponencial na camada de persistência."*
+
+1. **Saudação Obrigatória Limpa:** O `orchestrator` inicia a resposta saudando o usuário pelo nome registrado em `CORE.md` (sem emitir relatórios de boot ou status internos).
+2. **Discovery Read-Only Leve:** Caso o contexto inicial não informe a stack do projeto, o `orchestrator` lê o manifesto de dependências sob a whitelist semântica (ex: `pyproject.toml` ou `package.json` com teto seguro `< 16 KB` / ~400 linhas) para identificar bibliotecas existentes (`asyncpg`, `tenacity`).
+
+### Passo 2 — Lei Zero ou Decomposição em DAG Fan-Out Paralelo
+Se houvesse ambiguidade ou múltiplos caminhos de arquitetura, o `orchestrator` aplicaria a **Lei Zero (Zero Assumptions)**, consultando o usuário com alternativas estruturadas e recomendação técnica.
+
+Com requisitos claros, o `orchestrator` divide a demanda em subtarefas atômicas ortogonais e realiza o disparo em paralelo via `[SUBAGENT_TASK]` com **Auto-Model Routing**:
+
+```markdown
+<!-- Subtarefa A: Arquitetura e concorrência crítica -> Model: "pro" -->
+[SUBAGENT_TASK]
+AGENT_ID: agent-db
+AGENT_DEF: ~/.gemini/agents/agent-db/AGENT.md
+ATOMIC_GOAL: Implementar ConnectionPoolAdapter resiliente com retry exponencial e Ports & Adapters
+CONTEXT: pyproject.toml (asyncpg), src/core/ports/database.py
+
+<!-- Subtarefa B: Testes unitários e mocks -> Model: "flash" -->
+[SUBAGENT_TASK]
+AGENT_ID: agent-default
+AGENT_DEF: ~/.gemini/agents/agent-default/AGENT.md
+ATOMIC_GOAL: Criar suite de testes unitários mockando interrupções de conexão e validando backoff
+CONTEXT: tests/test_database.py
+```
+
+### Passo 3 — Execução Isolada & Persistência Concorrente no L2 (Schema v3)
+Os subagentes executam suas tarefas em paralelo com isolamento estrito:
+1. **Consulta Cognitiva:** O `agent-db` busca playbooks e soluções anteriores:
+   ```bash
+   ~/.gemini/memory/mem search "connection pool retry" --ns db --json
+   ```
+2. **Implementação & Validação:** O código e testes são desenvolvidos conforme SOLID e Clean Architecture.
+3. **Persistência com Proveniência (Schema L2 v3):** O especialista grava o novo conhecimento técnico informando autoria e confiabilidade:
+   ```bash
+   ~/.gemini/memory/mem upsert db invariant "connection-pool-resilience" "Pool assíncrono com max=20, timeout=5s e retry exponencial max=3 tentativas" "db,pool,retry" --source "agent-db" --confidence 0.95
+   ```
+4. **Conclusão M2M Telegráfica:** O worker emite o payload determinístico:
+   ```yaml
+   STATUS: COMPLETED
+   AGENT: agent-db
+   RESULT: "ConnectionPoolAdapter implementado com asyncpg e backoff exponencial. Testes integrados com 100% pass."
+   PATHS: ["/home/user/dev/src/infra/db/pool.py"]
+   MEMORY_DELTA: "db:connection-pool-resilience"
+   ```
+
+### Passo 4 — Fan-In Single-Writer & Validação L1
+No retorno paralelo (Fan-In), o `orchestrator` consolida os resultados:
+1. **Curadoria Exclusiva de L1 (Single-Writer):** Caso surja novo domínio ou invariante global em `MEMORY_DELTA`, **apenas o `orchestrator`** edita o `CORE.md` (mantendo sincronia 1:1 com `CORE.template.md`).
+2. **Validação de Orçamento e Densidade:** Executa auditoria bloqueante do limite de $\le 60$ linhas:
+   ```bash
+   ~/.gemini/memory/mem check-core
+   ```
+3. **Síntese Executiva:** O `orchestrator` responde ao usuário com síntese técnica densa, destacando arquivos alterados e status da validação.
 
 ---
 
