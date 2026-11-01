@@ -1,979 +1,658 @@
 #!/usr/bin/env python3
 """
-Antigravity Tier-2 Archival & Episodic Memory Engine (SQLite + FTS5 BM25 + Temporal Upsert).
-Inspired by Letta (MemGPT), CoALA, Mem0, and Zep/Graphiti.
-
-Features:
-  - 7-Memory Evolution: Working, Episodic, Semantic Graph, Procedural, Prospective, Retrieval, Declarative.
-  - Semantic Freshness / TTL (--ttl + mem verify) with stale alerts.
-  - Wiki Markdown Export/Import (mem export-md + mem import-md) with YAML frontmatter & WikiLinks.
-  - FTS5 BM25 hybrid ranking with access count recency & frequency scaling.
-  - Dynamic technical synonyms expansion.
-  - Semantic memory graph linking memories with explicit relations.
-  - Prospective memory (defer, due, done) with active namespace alerts.
-  - Episodic error recall with priority boosting for learning & playbook memories.
-  - Working memory guardrail checking CORE.md line count budget.
-  - Flexible project namespaces ('proj:<name>') alongside standard domain namespaces.
-  - Topic promotion to CORE.md Semantic Directory via 'promote'.
-
-Usage:
-  mem init [--user "<name>"] [--lang "<lang>"] [--workspace "<path>"] [--force]
-  mem search "<query>" [--ns <namespace>] [--limit <N>]
-  mem get <namespace> "<topic>"
-  mem upsert <namespace> <kind> "<topic>" "<content>" ["<tags>"] [--ttl <days>]
-  mem verify <namespace> "<topic>" [--ttl <days>]
-  mem list [--ns <namespace>]
-  mem delete <namespace> "<topic>"
-  mem promote [--ns <namespace>] [--limit <N>] [--by hits|recent] [--min-hits <N>]
-  mem stats
-  mem link <src_ns>:<src_topic> <relation> <dst_ns>:<dst_topic>
-  mem defer <namespace> "<trigger_cond>" "<action>"
-  mem due [--ns <namespace>]
-  mem done <task_id>
-  mem syn [list | add <term> "<syn1,syn2,...>"]
-  mem recall-error "<error_snippet>" [--ns <namespace>] [--limit <N>]
-  mem check-core
-  mem export-md [dir] [--ns <namespace>]
-  mem import-md [dir]
+Antigravity Tier-2 Archival & Cognitive Memory Engine.
+Refactored with Clean Architecture (Ports & Adapters), SOLID principles,
+Concurrency-safe SQLite WAL + busy_timeout, POSIX File Locking, and Normalized FTS5 BM25 Ranking.
 """
 import argparse
+import contextlib
+import hashlib
 import os
 import re
 import sqlite3
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Callable, Iterator, Protocol, Sequence
 
-MEM_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(MEM_DIR, "archival.db")
-CORE_PATH = os.path.join(MEM_DIR, "CORE.md")
-CORE_TEMPLATE_PATH = os.path.join(MEM_DIR, "CORE.template.md")
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
+SCHEMA_VERSION = 2
+CORE_MAX_LINES = 60
 VALID_KINDS = ("fact", "learning", "behavior", "decision", "invariant", "playbook")
+
+DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — Hot In-Context Cache)
+> **Orçamento Estrito:** `<= 60` linhas (validado por `~/.gemini/memory/mem check-core`). Conhecimento detalhado reside no L2 (`archival.db`).
+
+## 👤 1. Perfil & Invariantes Globais do Usuário (SSOT de Identidade)
+- **Usuário:** **{{USER_NAME}}** *(Saudação obrigatória pelo nome em todas as respostas do `orchestrator`)*.
+- **Idioma:** {{USER_LANG}}
+- **Saudação Limpa (Zero Boot/Status Report):** Ao iniciar o chat ou carregar o agente, NUNCA informe status internos. Cumprimento direto e natural.
+- **Invariantes Operacionais:**
+  1. **Lei Zero (Zero Assumptions):** NUNCA assumir decisões de negócio, arquitetura, contratos ou escopo. Delegar ao usuário com opções e recomendação técnica clara.
+  2. **Git Seguro:** Proibição absoluta de `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
+  3. **Topologia Estrela + DAG Fan-Out:** Decomposição atômica máxima, disparo paralelo e Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`).
+  4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In. Subagentes gravam em paralelo no L2 (`mem`) e reportam `MEMORY_DELTA`.
+  5. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas. Sugerir especialistas proativamente.
+
+## 🗺️ 2. Ambiente Ativo & Caminhos-Chave
+- **Workspace Padrão:** {{DEFAULT_WORKSPACE}}
+- **Constituição & Agentes:** `~/.gemini/GEMINI.md` | `~/.gemini/agents/{COMMON_INSTRUCTIONS.md,*/AGENT.md}`
+- **Motor Cognitivo L2:** `~/.gemini/memory/archival.db` (CLI: `~/.gemini/memory/mem`)
+
+## 🧭 3. Semantic Directory (Ponteiros L2 & Plugins Especialistas)
+> *Consulte L2 (`~/.gemini/memory/mem search "<termo>" [--ns <dominio>]`) apenas quando a subtarefa envolver os tópicos abaixo:*
+- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`.
+- **`git`** (`~/.gemini/agents/agent-git/AGENT.md`): Mensagens de commit (Título+Descrição+Lista), PRs, semântica de diffs e governança read-only.
+- **`default`** (`~/.gemini/agents/agent-default/AGENT.md`): Fallback generalista (Shell, Linux, Python/scripts, Web Search, Bootstrap).
+<!-- Especialistas: - **<domain>** (~/.gemini/agents/agent-<domain>/AGENT.md): Resumo de invariantes -->
+<!-- Projetos: - **proj:<name>**: Tópicos indexados em L2 -->
+"""
 
 DOMAIN_NAMESPACE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 PROJECT_NAMESPACE_PATTERN = re.compile(r"^proj:[a-zA-Z0-9._-]+$")
+CAMEL_CASE_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
-SYNONYM_GROUPS = [
-    {"gc", "garbage collector", "garbage collection"},
-    {"loom", "virtual threads", "virtual thread", "project loom"},
-    {"ffm", "foreign function", "foreign memory", "project panama"},
-    {"zgc", "shenandoah", "low latency gc"},
-    {"mvcc", "concurrency", "multiversion concurrency control"},
-    {"explain", "buffers", "explain analyze"},
-    {"k8s", "kubernetes"},
-    {"docker", "container", "containers"},
-    {"hexagonal", "ports and adapters", "clean architecture"},
-    {"postgres", "postgresql", "psql"},
-    {"perf", "performance", "jmh", "benchmark"},
-    {"jit", "c2", "graalvm"},
-]
+ERROR_STOPWORDS = frozenset({
+    "error", "exception", "traceback", "most", "recent", "call", "last",
+    "file", "line", "module", "function", "method", "class", "object",
+    "null", "none", "true", "false", "void", "int", "str", "string",
+    "org", "com", "net", "java", "lang", "util", "internal", "runtime",
+    "main", "run", "exec", "invoke", "from", "with", "that", "this",
+    "for", "and", "the", "not", "are", "was", "were", "has", "have",
+    "caused", "failed", "cannot", "could", "unable", "invalid"
+})
 
-SYNONYM_MAP: dict[str, list[str]] = {}
-for group in SYNONYM_GROUPS:
-    for item in group:
-        SYNONYM_MAP[item.lower()] = [other.lower() for other in group if other != item]
-
-
-def is_valid_namespace(ns: str) -> bool:
-    if not ns:
-        return False
-    return bool(DOMAIN_NAMESPACE_PATTERN.match(ns) or PROJECT_NAMESPACE_PATTERN.match(ns))
-
-
-def validate_namespace(ns: str) -> None:
-    if not is_valid_namespace(ns):
-        sys.exit(
-            f"Error: invalid namespace '{ns}'. Allowed: '<domain>' (^[a-z0-9][a-z0-9_-]*$) or 'proj:<name>' (^proj:[a-zA-Z0-9._-]+$)"
-        )
+DEFAULT_SYNONYM_GROUPS: Sequence[frozenset[str]] = (
+    frozenset({"gc", "garbage collector", "garbage collection"}),
+    frozenset({"loom", "virtual threads", "virtual thread", "project loom"}),
+    frozenset({"ffm", "foreign function", "foreign memory", "project panama"}),
+    frozenset({"zgc", "shenandoah", "low latency gc"}),
+    frozenset({"mvcc", "concurrency", "multiversion concurrency control"}),
+    frozenset({"explain", "buffers", "explain analyze"}),
+    frozenset({"k8s", "kubernetes"}),
+    frozenset({"docker", "container", "containers"}),
+    frozenset({"hexagonal", "ports and adapters", "clean architecture"}),
+    frozenset({"postgres", "postgresql", "psql"}),
+    frozenset({"perf", "performance", "jmh", "benchmark"}),
+    frozenset({"jit", "c2", "graalvm"}),
+)
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    # 1. Check existing memories schema
-    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
-    if row is None:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                namespace TEXT NOT NULL,
-                kind TEXT NOT NULL CHECK(kind IN ('fact', 'learning', 'behavior', 'decision', 'invariant', 'playbook')),
-                topic TEXT NOT NULL,
-                content TEXT NOT NULL,
-                tags TEXT DEFAULT '',
-                access_count INTEGER DEFAULT 0,
-                ttl_days INTEGER DEFAULT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(namespace, topic)
-            );
+# ============================================================================
+# 1. DOMAIN EXCEPTIONS & VALUE OBJECTS / ENTITIES
+# ============================================================================
 
-            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                topic,
-                content,
-                tags,
-                namespace,
-                content='memories',
-                content_rowid='id',
-                tokenize='unicode61 remove_diacritics 2'
-            );
+class DomainValidationError(Exception):
+    """Raised when domain invariants or input constraints are violated."""
 
-            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-            END;
 
-            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-            END;
+class ResourceNotFoundError(Exception):
+    """Raised when a requested memory record or path does not exist."""
 
-            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-            END;
-            """
-        )
-    else:
-        table_sql = row[0] or ""
-        if "'playbook'" not in table_sql:
-            # Safe non-destructive schema migration
-            conn.execute("PRAGMA foreign_keys=OFF;")
-            conn.executescript(
-                """
-                CREATE TABLE memories_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    namespace TEXT NOT NULL,
-                    kind TEXT NOT NULL CHECK(kind IN ('fact', 'learning', 'behavior', 'decision', 'invariant', 'playbook')),
-                    topic TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    tags TEXT DEFAULT '',
-                    access_count INTEGER DEFAULT 0,
-                    ttl_days INTEGER DEFAULT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(namespace, topic)
-                );
 
-                INSERT INTO memories_new (id, namespace, kind, topic, content, tags, access_count, created_at, updated_at)
-                SELECT id, namespace, kind, topic, content, tags, access_count, created_at, updated_at FROM memories;
+@dataclass(frozen=True, slots=True)
+class MemoryRecord:
+    id: int
+    namespace: str
+    kind: str
+    topic: str
+    content: str
+    tags: str
+    access_count: int
+    ttl_days: int | None
+    created_at: str
+    updated_at: str
+    score: float = 0.0
 
-                DROP TRIGGER IF EXISTS memories_ai;
-                DROP TRIGGER IF EXISTS memories_ad;
-                DROP TRIGGER IF EXISTS memories_au;
 
-                DROP TABLE memories;
+@dataclass(frozen=True, slots=True)
+class SemanticEdge:
+    relation: str
+    namespace: str
+    topic: str
+    direction: str  # 'out' or 'in'
 
-                ALTER TABLE memories_new RENAME TO memories;
 
-                CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                    INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                    VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                END;
+@dataclass(frozen=True, slots=True)
+class ProspectiveTask:
+    id: int
+    namespace: str
+    trigger_cond: str
+    action: str
+    status: str
+    created_at: str
+    completed_at: str | None = None
 
-                CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                    VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                END;
 
-                CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
-                    INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                    VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                    INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                    VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                END;
+@dataclass(frozen=True, slots=True)
+class NamespaceStat:
+    namespace: str
+    count: int
+    hits: int
+    total_bytes: int
 
-                INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
-                """
+
+@dataclass(frozen=True, slots=True)
+class StorageStats:
+    namespaces: Sequence[NamespaceStat]
+    stale_count: int
+    ttl_monitored_count: int
+    pending_tasks_count: int
+    total_tasks_count: int
+    edges_count: int
+    synonyms_count: int
+    top_records: Sequence[MemoryRecord]
+
+
+@dataclass(slots=True)
+class WikiDocument:
+    namespace: str
+    topic: str
+    kind: str = "fact"
+    tags: str = ""
+    access_count: int = 0
+    ttl_days: int | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    links: list[str] = field(default_factory=list)
+    body: str = ""
+
+
+# ============================================================================
+# 2. ARCHITECTURAL PORTS (INTERFACES)
+# ============================================================================
+
+class ClockPort(Protocol):
+    def now_iso(self) -> str: ...
+    def now_dt(self) -> datetime: ...
+    def parse_iso(self, dt_str: str) -> datetime: ...
+
+
+class MemoryRepositoryPort(Protocol):
+    def initialize(self, foundational_records: Sequence[tuple[str, str, str, str, str]], ts: str) -> None: ...
+    def upsert(self, namespace: str, kind: str, topic: str, content: str, tags: str, ttl_days: int | None, ts: str) -> None: ...
+    def verify_freshness(self, namespace: str, topic: str, new_ttl: int | None, update_ttl: bool, ts: str) -> int | None: ...
+    def get_by_topic(self, namespace: str, topic: str, increment_hit: bool = True) -> tuple[MemoryRecord, Sequence[SemanticEdge]]: ...
+    def search_fts(self, fts_query: str, namespace: str | None, limit: int, prioritize_episodic: bool = False) -> Sequence[MemoryRecord]: ...
+    def list_records(self, namespace: str | None) -> Sequence[MemoryRecord]: ...
+    def delete_record(self, namespace: str, topic: str) -> bool: ...
+    def get_promotion_candidates(self, namespace: str | None, by: str, min_hits: int, limit: int) -> Sequence[MemoryRecord]: ...
+    def link_topics(self, src_ns: str, src_topic: str, relation: str, dst_ns: str, dst_topic: str, ts: str) -> None: ...
+    def defer_task(self, namespace: str, trigger_cond: str, action: str, ts: str) -> int: ...
+    def list_due_tasks(self, namespaces: Sequence[str] | None = None) -> Sequence[ProspectiveTask]: ...
+    def complete_task(self, task_id: int, ts: str) -> bool: ...
+    def get_synonyms(self) -> dict[str, list[str]]: ...
+    def upsert_synonym(self, term: str, expanded: str) -> None: ...
+    def get_all_for_export(self, namespace: str | None) -> Sequence[tuple[MemoryRecord, Sequence[SemanticEdge], Sequence[SemanticEdge]]]: ...
+    def bulk_import(self, docs: Sequence[WikiDocument], default_ts: str) -> tuple[int, int]: ...
+    def compute_stats(self, stale_checker: Callable[[str, int | None], str | None]) -> StorageStats: ...
+
+
+# ============================================================================
+# 3. PURE DOMAIN POLICIES & SERVICES
+# ============================================================================
+
+class DomainPolicy:
+    @staticmethod
+    def validate_namespace(ns: str) -> None:
+        if not ns or not (DOMAIN_NAMESPACE_PATTERN.match(ns) or PROJECT_NAMESPACE_PATTERN.match(ns)):
+            raise DomainValidationError(
+                f"Invalid namespace '{ns}'. Allowed: '<domain>' (^[a-z0-9][a-z0-9_-]*$) or 'proj:<name>' (^proj:[a-zA-Z0-9._-]+$)"
             )
-            conn.execute("PRAGMA foreign_keys=ON;")
 
-        # Check if ttl_days column exists
-        cols = [col[1] for col in conn.execute("PRAGMA table_info(memories)").fetchall()]
-        if "ttl_days" not in cols:
-            conn.execute("ALTER TABLE memories ADD COLUMN ttl_days INTEGER DEFAULT NULL;")
+    @staticmethod
+    def validate_kind(kind: str) -> None:
+        if kind not in VALID_KINDS:
+            raise DomainValidationError(f"Invalid kind '{kind}'. Must be one of {VALID_KINDS}")
 
-    # 2. Semantic memory graph edges
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS memory_edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id INTEGER NOT NULL,
-            target_id INTEGER NOT NULL,
-            relation TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(source_id, target_id, relation),
-            FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
-            FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
-        );
-        """
-    )
+    @staticmethod
+    def parse_ttl(ttl_arg: str | int | None, kind: str, is_verify: bool = False) -> tuple[int | None, bool]:
+        if ttl_arg is None:
+            if is_verify:
+                return None, False
+            return (30 if kind == "fact" else None), True
+        raw = str(ttl_arg).strip().lower()
+        if raw in ("0", "none", "null", "~"):
+            return None, True
+        try:
+            val = int(raw)
+            if val < 0:
+                raise ValueError()
+            return (val if val > 0 else None), True
+        except ValueError:
+            raise DomainValidationError(f"Invalid --ttl value '{ttl_arg}'. Expected positive integer or '0'/'none'")
 
-    # 3. Prospective memory tasks
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS prospective_tasks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            namespace TEXT NOT NULL,
-            trigger_cond TEXT NOT NULL,
-            action TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'done')),
-            created_at TEXT NOT NULL,
-            completed_at TEXT
-        );
-        """
-    )
-
-    # 4. Dynamic synonyms
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS synonyms (
-            term TEXT PRIMARY KEY,
-            expanded TEXT NOT NULL
-        );
-        """
-    )
-
-    # Seed synonyms from default SYNONYM_GROUPS if empty
-    syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
-    if syn_count == 0:
-        for group in SYNONYM_GROUPS:
-            for item in group:
-                term = item.lower()
-                expanded = ", ".join(sorted(other.lower() for other in group if other != item))
-                conn.execute(
-                    "INSERT OR IGNORE INTO synonyms (term, expanded) VALUES (?, ?)",
-                    (term, expanded),
-                )
-        conn.commit()
-
-
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
-    init_db(conn)
-    return conn
-
-
-def load_synonyms(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    syn_map: dict[str, list[str]] = {}
-    try:
-        rows = conn.execute("SELECT term, expanded FROM synonyms").fetchall()
-        for r in rows:
-            term = r["term"].strip().lower()
-            items = [s.strip().lower() for s in r["expanded"].split(",") if s.strip()]
-            if items:
-                syn_map[term] = items
-    except Exception:
-        pass
-    if not syn_map:
-        return SYNONYM_MAP
-    return syn_map
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def parse_iso(dt_str: str) -> datetime:
-    clean = dt_str.strip()
-    if clean.endswith("Z"):
-        clean = clean[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(clean)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return datetime.now(timezone.utc)
-
-
-def check_stale(updated_at_str: str, ttl_days: int | None) -> str | None:
-    if ttl_days is None:
-        return None
-    try:
-        ttl_int = int(ttl_days)
-    except (ValueError, TypeError):
-        return None
-    if ttl_int <= 0:
-        return None
-    try:
-        updated_dt = parse_iso(updated_at_str)
-        now_dt = datetime.now(timezone.utc)
-        elapsed_days = int((now_dt - updated_dt).total_seconds() // 86400)
-        if elapsed_days > ttl_int:
+    @staticmethod
+    def check_stale(updated_at_str: str, ttl_days: int | None, clock: ClockPort) -> str | None:
+        if ttl_days is None or ttl_days <= 0:
+            return None
+        updated_dt = clock.parse_iso(updated_at_str)
+        elapsed_days = int((clock.now_dt() - updated_dt).total_seconds() // 86400)
+        if elapsed_days > ttl_days:
             return (
-                f"⚠️ STALE MEMORY (verificada há {elapsed_days}d, TTL={ttl_int}d — "
+                f"⚠️ STALE MEMORY (verificada há {elapsed_days}d, TTL={ttl_days}d — "
                 f"revalide no ambiente e rode 'mem verify <ns> \"<topic>\"')"
             )
+        return None
+
+    @staticmethod
+    def format_fts_term(term: str, is_literal: bool = False) -> str:
+        clean = term.replace('"', '""').strip()
+        if not clean:
+            return ""
+        if " " in clean or is_literal:
+            return f'"{clean}"'
+        return f'"{clean}"*'
+
+    @classmethod
+    def build_fts_query(cls, user_query: str, syn_map: dict[str, list[str]]) -> tuple[str, list[str]]:
+        raw_query = user_query.strip()
+        if not raw_query:
+            return "", []
+
+        tokens: list[tuple[str, bool]] = []
+        for quoted, word in re.findall(r'"([^"]+)"|(\S+)', raw_query):
+            t = (quoted or word).strip()
+            if t:
+                tokens.append((t, bool(quoted)))
+
+        if not tokens:
+            return "", []
+
+        norm_full = raw_query.lower().strip("\"'")
+        flat_words = [w for w in re.split(r"\s+", norm_full) if w]
+
+        synonyms_found: set[str] = set()
+        if norm_full in syn_map:
+            synonyms_found.update(syn_map[norm_full])
+
+        for n in (3, 2):
+            for i in range(len(flat_words) - n + 1):
+                ngram = " ".join(flat_words[i : i + n])
+                if ngram in syn_map:
+                    synonyms_found.update(syn_map[ngram])
+
+        for w in flat_words:
+            if w in syn_map:
+                synonyms_found.update(syn_map[w])
+
+        clauses: list[str] = []
+        seen: set[str] = set()
+
+        for t, is_literal in tokens:
+            c = cls.format_fts_term(t, is_literal)
+            if c and c.lower() not in seen:
+                clauses.append(c)
+                seen.add(c.lower())
+
+        added_synonyms: list[str] = []
+        for s in sorted(synonyms_found):
+            if s in norm_full:
+                continue
+            c = cls.format_fts_term(s, is_literal=(" " in s))
+            if c and c.lower() not in seen:
+                clauses.append(c)
+                seen.add(c.lower())
+                added_synonyms.append(s)
+
+        return " OR ".join(clauses), added_synonyms
+
+    @classmethod
+    def build_error_fts_query(cls, error_snippet: str, max_terms: int = 24) -> tuple[str, list[str]]:
+        raw_words = re.findall(r"[a-zA-Z0-9_]{3,}", error_snippet)
+        seen: set[str] = set()
+        candidates: list[str] = []
+
+        for token in raw_words:
+            camel_parts = CAMEL_CASE_SPLIT.split(token)
+            snake_parts = [p for p in token.split("_") if p]
+            parts = [token] + camel_parts + snake_parts
+
+            for part in parts:
+                clean = part.lower().strip("_")
+                if len(clean) >= 3 and clean not in seen and clean not in ERROR_STOPWORDS and not clean.isdigit():
+                    seen.add(clean)
+                    candidates.append(clean)
+
+        candidates.sort(key=lambda x: (-len(x), x))
+        selected = candidates[:max_terms]
+        if not selected:
+            return "", []
+
+        clauses = [cls.format_fts_term(w, is_literal=True) for w in selected]
+        return " OR ".join(clauses), selected
+
+    @staticmethod
+    def make_summary(content: str, tags: str) -> str:
+        first_line = content.strip().split("\n")[0].strip()
+        first_line = first_line.lstrip("#").strip().strip("*").strip()
+        sentences = [s.strip() for s in re.split(r"\.\s+(?=[A-Za-z0-9])|\.\s*$", first_line) if s.strip()]
+        sentence = sentences[0] if sentences else first_line
+        if len(sentence) > 70:
+            sentence = sentence[:67].strip() + "..."
+        if sentence:
+            return sentence
+        if tags:
+            return f"tags: {tags}"
+        return "L2 record"
+
+
+# ============================================================================
+# 4. DRIVEN ADAPTERS (INFRASTRUCTURE: CLOCK, FILE LOCK, SQLITE, MARKDOWN WIKI)
+# ============================================================================
+
+@contextlib.contextmanager
+def file_lock(lock_path: str) -> Iterator[None]:
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lf:
+        if fcntl is not None:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def immediate_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
+    is_outer = not conn.in_transaction
+    if is_outer:
+        conn.execute("BEGIN IMMEDIATE;")
+    try:
+        yield conn
+        if is_outer and conn.in_transaction:
+            conn.execute("COMMIT;")
     except Exception:
-        pass
-    return None
+        if is_outer and conn.in_transaction:
+            conn.execute("ROLLBACK;")
+        raise
 
 
-def format_fts_term(term: str, is_literal: bool = False) -> str:
-    clean = term.replace('"', '""').strip()
-    if not clean:
-        return ""
-    if " " in clean or is_literal:
-        return f'"{clean}"'
-    return f'"{clean}"*'
+class UtcClockAdapter:
+    def now_iso(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def now_dt(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def parse_iso(self, dt_str: str) -> datetime:
+        clean = dt_str.strip()
+        if clean.endswith("Z"):
+            clean = clean[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return self.now_dt()
 
 
-def build_fts_query(user_query: str, syn_map: dict[str, list[str]] | None = None) -> tuple[str, list[str]]:
-    raw_query = user_query.strip()
-    if not raw_query:
-        return "", []
+class SqliteMemoryRepository:
+    def __init__(self, db_path: str) -> None:
+        self._db_path = db_path
+        self._conn: sqlite3.Connection | None = None
 
-    tokens: list[tuple[str, bool]] = []
-    matches = re.findall(r'"([^"]+)"|(\S+)', raw_query)
-    for quoted, word in matches:
-        t = (quoted or word).strip()
-        if t:
-            tokens.append((t, bool(quoted)))
+    def _get_conn(self) -> sqlite3.Connection:
+        if self._conn is not None:
+            return self._conn
+        conn = sqlite3.connect(self._db_path, timeout=30.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA temp_store=MEMORY;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        version = conn.execute("PRAGMA user_version;").fetchone()[0]
+        if version < SCHEMA_VERSION:
+            self._ensure_schema(conn)
+        self._conn = conn
+        return conn
 
-    if not tokens:
-        return "", []
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        with immediate_transaction(conn):
+            row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
+            if row is None:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS memories (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        namespace TEXT NOT NULL,
+                        kind TEXT NOT NULL CHECK(kind IN ('fact', 'learning', 'behavior', 'decision', 'invariant', 'playbook')),
+                        topic TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        tags TEXT DEFAULT '',
+                        access_count INTEGER DEFAULT 0,
+                        ttl_days INTEGER DEFAULT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(namespace, topic)
+                    );
 
-    norm_full = raw_query.lower().strip("\"'")
-    flat_words = [w for w in re.split(r"\s+", norm_full) if w]
+                    CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);
 
-    if syn_map is None:
-        syn_map = SYNONYM_MAP
+                    CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                        topic,
+                        content,
+                        tags,
+                        namespace,
+                        content='memories',
+                        content_rowid='id',
+                        tokenize='unicode61 remove_diacritics 2'
+                    );
 
-    synonyms_found = set()
-    # 1. Full query match
-    if norm_full in syn_map:
-        synonyms_found.update(syn_map[norm_full])
+                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                        INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                        VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                    END;
 
-    # 2. Substrings / N-grams
-    for n in (3, 2):
-        for i in range(len(flat_words) - n + 1):
-            ngram = " ".join(flat_words[i : i + n])
-            if ngram in syn_map:
-                synonyms_found.update(syn_map[ngram])
+                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                        VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                    END;
 
-    # 3. Individual words
-    for w in flat_words:
-        if w in syn_map:
-            synonyms_found.update(syn_map[w])
+                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                        VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                        INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                        VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                    END;
+                    """
+                )
+            else:
+                table_sql = row[0] or ""
+                if "'playbook'" not in table_sql:
+                    conn.execute("PRAGMA foreign_keys=OFF;")
+                    conn.executescript(
+                        """
+                        CREATE TABLE memories_new (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            namespace TEXT NOT NULL,
+                            kind TEXT NOT NULL CHECK(kind IN ('fact', 'learning', 'behavior', 'decision', 'invariant', 'playbook')),
+                            topic TEXT NOT NULL,
+                            content TEXT NOT NULL,
+                            tags TEXT DEFAULT '',
+                            access_count INTEGER DEFAULT 0,
+                            ttl_days INTEGER DEFAULT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE(namespace, topic)
+                        );
+                        INSERT INTO memories_new (id, namespace, kind, topic, content, tags, access_count, created_at, updated_at)
+                        SELECT id, namespace, kind, topic, content, tags, access_count, created_at, updated_at FROM memories;
+                        DROP TRIGGER IF EXISTS memories_ai;
+                        DROP TRIGGER IF EXISTS memories_ad;
+                        DROP TRIGGER IF EXISTS memories_au;
+                        DROP TABLE memories;
+                        ALTER TABLE memories_new RENAME TO memories;
+                        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                            INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                            VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                            INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                            VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                        END;
+                        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
+                            INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                            VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                            INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                            VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                        END;
+                        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+                        """
+                    )
+                    conn.execute("PRAGMA foreign_keys=ON;")
 
-    clauses = []
-    seen = set()
+                cols = [col[1] for col in conn.execute("PRAGMA table_info(memories)").fetchall()]
+                if "ttl_days" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN ttl_days INTEGER DEFAULT NULL;")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);")
 
-    # Original tokens/phrases
-    for t, is_literal in tokens:
-        c = format_fts_term(t, is_literal)
-        if c and c.lower() not in seen:
-            clauses.append(c)
-            seen.add(c.lower())
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS memory_edges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    relation TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_id, target_id, relation),
+                    FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                    FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
+                );
 
-    # Add synonyms
-    added_synonyms = []
-    for s in sorted(synonyms_found):
-        if s in norm_full:
-            continue
-        c = format_fts_term(s, is_literal=(" " in s))
-        if c and c.lower() not in seen:
-            clauses.append(c)
-            seen.add(c.lower())
-            added_synonyms.append(s)
+                CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges(source_id);
+                CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id);
 
-    return " OR ".join(clauses), added_synonyms
+                CREATE TABLE IF NOT EXISTS prospective_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    namespace TEXT NOT NULL,
+                    trigger_cond TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'done')),
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
 
+                CREATE INDEX IF NOT EXISTS idx_prospective_ns_status ON prospective_tasks(namespace, status);
 
-def make_summary(content: str, tags: str) -> str:
-    first_line = content.strip().split("\n")[0].strip()
-    first_line = first_line.lstrip("#").strip().strip("*").strip()
-    sentences = [s.strip() for s in re.split(r'\.\s+(?=[A-Za-z0-9])|\.\s*$', first_line) if s.strip()]
-    sentence = sentences[0] if sentences else first_line
-    if len(sentence) > 70:
-        sentence = sentence[:67].strip() + "..."
-    if sentence:
-        return sentence
-    if tags:
-        return f"tags: {tags}"
-    return "L2 record"
-
-
-def print_prospective_alerts(conn: sqlite3.Connection, namespaces: list[str]) -> None:
-    if not namespaces:
-        return
-    placeholders = ",".join("?" * len(namespaces))
-    tasks = conn.execute(
-        f"SELECT id, namespace, trigger_cond, action FROM prospective_tasks WHERE status = 'pending' AND namespace IN ({placeholders}) ORDER BY id",
-        namespaces,
-    ).fetchall()
-    for t in tasks:
-        print(f"🔔 PROSPECTIVE DUE [{t['namespace']}]: #{t['id']} [{t['trigger_cond']}] -> {t['action']}")
-    if tasks:
-        print()
-
-
-def cmd_upsert(args: argparse.Namespace) -> None:
-    validate_namespace(args.namespace)
-    if args.kind not in VALID_KINDS:
-        sys.exit(f"Error: kind must be one of {VALID_KINDS}")
-    conn = get_conn()
-    ts = now_iso()
-
-    ttl_days: int | None = None
-    if args.ttl is not None:
-        ttl_raw = str(args.ttl).strip().lower()
-        if ttl_raw in ("0", "none", "null"):
-            ttl_days = None
-        else:
-            try:
-                ttl_days = int(ttl_raw)
-            except ValueError:
-                sys.exit(f"Error: invalid --ttl value '{args.ttl}'. Expected integer or '0'/'none'")
-    else:
-        ttl_days = 30 if args.kind == "fact" else None
-
-    with conn:
-        conn.execute(
-            """
-            INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
-            ON CONFLICT(namespace, topic) DO UPDATE SET
-                kind = excluded.kind,
-                content = excluded.content,
-                tags = excluded.tags,
-                ttl_days = excluded.ttl_days,
-                updated_at = excluded.updated_at
-            """,
-            (args.namespace, args.kind, args.topic, args.content, args.tags or "", ttl_days, ts, ts),
-        )
-    ttl_msg = f" (ttl={ttl_days}d)" if ttl_days is not None else ""
-    print(f"[OK] Upserted [{args.namespace}/{args.kind}] topic='{args.topic}'{ttl_msg} at {ts}")
-
-
-def cmd_verify(args: argparse.Namespace) -> None:
-    validate_namespace(args.namespace)
-    conn = get_conn()
-    ts = now_iso()
-    row = conn.execute(
-        "SELECT id, ttl_days FROM memories WHERE namespace = ? AND topic = ?",
-        (args.namespace, args.topic),
-    ).fetchone()
-    if not row:
-        sys.exit(f"Error: memory not found: [{args.namespace}] topic='{args.topic}'")
-
-    if args.ttl is not None:
-        ttl_raw = str(args.ttl).strip().lower()
-        if ttl_raw in ("0", "none", "null"):
-            new_ttl = None
-        else:
-            try:
-                new_ttl = int(ttl_raw)
-            except ValueError:
-                sys.exit(f"Error: invalid --ttl value '{args.ttl}'. Expected integer or '0'/'none'")
-        with conn:
-            conn.execute(
-                "UPDATE memories SET updated_at = ?, ttl_days = ? WHERE namespace = ? AND topic = ?",
-                (ts, new_ttl, args.namespace, args.topic),
+                CREATE TABLE IF NOT EXISTS synonyms (
+                    term TEXT PRIMARY KEY,
+                    expanded TEXT NOT NULL
+                );
+                """
             )
-        ttl_msg = f" (ttl={new_ttl}d)" if new_ttl is not None else " (ttl=infinite)"
-    else:
-        with conn:
+
+            syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
+            if syn_count == 0:
+                for group in DEFAULT_SYNONYM_GROUPS:
+                    for item in group:
+                        term = item.lower()
+                        expanded = ", ".join(sorted(other.lower() for other in group if other != item))
+                        conn.execute(
+                            "INSERT OR IGNORE INTO synonyms (term, expanded) VALUES (?, ?)",
+                            (term, expanded),
+                        )
+
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
+
+    @staticmethod
+    def _row_to_record(r: sqlite3.Row, score: float = 0.0) -> MemoryRecord:
+        return MemoryRecord(
+            id=r["id"],
+            namespace=r["namespace"],
+            kind=r["kind"],
+            topic=r["topic"],
+            content=r["content"],
+            tags=r["tags"] or "",
+            access_count=r["access_count"],
+            ttl_days=r["ttl_days"],
+            created_at=r["created_at"] if "created_at" in r.keys() else r["updated_at"],
+            updated_at=r["updated_at"],
+            score=score,
+        )
+
+    def initialize(self, foundational_records: Sequence[tuple[str, str, str, str, str]], ts: str) -> None:
+        conn = self._get_conn()
+        self._ensure_schema(conn)
+        with immediate_transaction(conn):
+            for ns, kind, topic, content, tags in foundational_records:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    """,
+                    (ns, kind, topic, content, tags, ts, ts),
+                )
+
+    def upsert(self, namespace: str, kind: str, topic: str, content: str, tags: str, ttl_days: int | None, ts: str) -> None:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
             conn.execute(
-                "UPDATE memories SET updated_at = ? WHERE namespace = ? AND topic = ?",
-                (ts, args.namespace, args.topic),
+                """
+                INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
+                ON CONFLICT(namespace, topic) DO UPDATE SET
+                    kind = excluded.kind,
+                    content = excluded.content,
+                    tags = excluded.tags,
+                    ttl_days = excluded.ttl_days,
+                    updated_at = excluded.updated_at
+                """,
+                (namespace, kind, topic, content, tags, ttl_days, ts, ts),
             )
-        ttl_msg = f" (ttl={row['ttl_days']}d)" if row["ttl_days"] is not None else ""
 
-    print(f"[OK] Verified freshness for [{args.namespace}] topic='{args.topic}'{ttl_msg} at {ts}")
+    def verify_freshness(self, namespace: str, topic: str, new_ttl: int | None, update_ttl: bool, ts: str) -> int | None:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT id, ttl_days FROM memories WHERE namespace = ? AND topic = ?",
+            (namespace, topic),
+        ).fetchone()
+        if not row:
+            raise ResourceNotFoundError(f"Memory not found: [{namespace}] topic='{topic}'")
 
-
-def cmd_search(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    conn = get_conn()
-    syn_map = load_synonyms(conn)
-    fts_query, syns = build_fts_query(args.query, syn_map)
-    if not fts_query:
-        sys.exit("Error: empty search query")
-
-    sql = """
-        SELECT m.id, m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.updated_at,
-               (bm25(memories_fts, 5.0, 1.0, 2.0, 0.5) * (1.0 + 0.15 * MIN(m.access_count, 30)) / (1.0 + 0.02 * MAX(0.0, julianday('now') - julianday(m.updated_at)))) AS hybrid_score
-        FROM memories_fts
-        JOIN memories m ON m.id = memories_fts.rowid
-        WHERE memories_fts MATCH ?
-    """
-    params: list = [fts_query]
-    if args.ns:
-        sql += " AND m.namespace = ?"
-        params.append(args.ns)
-    sql += " ORDER BY hybrid_score ASC, m.updated_at DESC LIMIT ?"
-    params.append(args.limit)
-
-    rows = conn.execute(sql, params).fetchall()
-
-    # Prospective tasks banner for queried namespace(s)
-    if args.ns:
-        print_prospective_alerts(conn, [args.ns])
-    else:
-        matched_ns = list(dict.fromkeys(r["namespace"] for r in rows))
-        print_prospective_alerts(conn, matched_ns)
-
-    if not rows:
-        msg = f"No archival memories matched query='{args.query}'"
-        if syns:
-            msg += f" (expanded with: {', '.join(syns)})"
-        if args.ns:
-            msg += f" in namespace='{args.ns}'"
-        print(msg)
-        return
-
-    ids = [r["id"] for r in rows]
-    with conn:
-        conn.executemany("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", [(i,) for i in ids])
-
-    if syns:
-        print(f"[FTS5 Expanded with synonyms: {', '.join(syns)}]\n")
-
-    for r in rows:
-        ttl_part = f" | ttl={r['ttl_days']}d" if r["ttl_days"] is not None else ""
-        print(f"=== [{r['namespace']}/{r['kind']}] {r['topic']} (tags: {r['tags'] or '-'} | updated: {r['updated_at']}{ttl_part} | hits: {r['access_count'] + 1}) ===")
-        stale_warn = check_stale(r["updated_at"], r["ttl_days"])
-        if stale_warn:
-            print(stale_warn)
-        print(r["content"])
-        print()
-
-
-def cmd_get(args: argparse.Namespace) -> None:
-    validate_namespace(args.namespace)
-    conn = get_conn()
-
-    # Prospective tasks banner
-    print_prospective_alerts(conn, [args.namespace])
-
-    row = conn.execute(
-        "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
-        (args.namespace, args.topic),
-    ).fetchone()
-    if not row:
-        sys.exit(f"Not found: [{args.namespace}] topic='{args.topic}'")
-    with conn:
-        conn.execute("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", (row["id"],))
-    ttl_part = f" | ttl={row['ttl_days']}d" if row["ttl_days"] is not None else ""
-    print(f"=== [{row['namespace']}/{row['kind']}] {row['topic']} (tags: {row['tags'] or '-'} | updated: {row['updated_at']}{ttl_part} | hits: {row['access_count'] + 1}) ===")
-    stale_warn = check_stale(row["updated_at"], row["ttl_days"])
-    if stale_warn:
-        print(stale_warn)
-    print(row["content"])
-
-    # Query linked memories (outgoing and incoming)
-    out_edges = conn.execute(
-        """
-        SELECT e.relation, m.namespace, m.topic
-        FROM memory_edges e
-        JOIN memories m ON e.target_id = m.id
-        WHERE e.source_id = ?
-        ORDER BY e.relation, m.namespace, m.topic
-        """,
-        (row["id"],),
-    ).fetchall()
-    in_edges = conn.execute(
-        """
-        SELECT e.relation, m.namespace, m.topic
-        FROM memory_edges e
-        JOIN memories m ON e.source_id = m.id
-        WHERE e.target_id = ?
-        ORDER BY e.relation, m.namespace, m.topic
-        """,
-        (row["id"],),
-    ).fetchall()
-
-    linked = []
-    for e in out_edges:
-        linked.append(f"--({e['relation']})--> [{e['namespace']}:{e['topic']}]")
-    for e in in_edges:
-        linked.append(f"<--({e['relation']})-- [{e['namespace']}:{e['topic']}]")
-    if linked:
-        print(f"\n🔗 Linked: {', '.join(linked)}")
-
-
-def cmd_list(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    conn = get_conn()
-    if args.ns:
-        rows = conn.execute(
-            "SELECT namespace, kind, topic, tags, access_count, ttl_days, updated_at FROM memories WHERE namespace = ? ORDER BY namespace, topic",
-            (args.ns,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT namespace, kind, topic, tags, access_count, ttl_days, updated_at FROM memories ORDER BY namespace, topic"
-        ).fetchall()
-    if not rows:
-        print("(Archival memory is empty)" if not args.ns else f"(No memories in namespace '{args.ns}')")
-        return
-    for r in rows:
-        ttl_part = f" | ttl={r['ttl_days']}d" if r["ttl_days"] is not None else ""
-        print(f"- [{r['namespace']}/{r['kind']}] {r['topic']} (tags: {r['tags'] or '-'}{ttl_part}) | updated: {r['updated_at']} | hits: {r['access_count']}")
-
-
-def cmd_delete(args: argparse.Namespace) -> None:
-    validate_namespace(args.namespace)
-    conn = get_conn()
-    with conn:
-        cur = conn.execute("DELETE FROM memories WHERE namespace = ? AND topic = ?", (args.namespace, args.topic))
-    if cur.rowcount:
-        print(f"[OK] Deleted [{args.namespace}] topic='{args.topic}'")
-    else:
-        print(f"[WARN] Topic not found: [{args.namespace}] topic='{args.topic}'")
-
-
-def cmd_promote(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    conn = get_conn()
-
-    order_by = "m.access_count DESC, m.updated_at DESC" if args.by == "hits" else "m.updated_at DESC, m.access_count DESC"
-    sql = f"""
-        SELECT m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.updated_at
-        FROM memories m
-        WHERE m.access_count >= ?
-    """
-    params: list = [args.min_hits]
-    if args.ns:
-        sql += " AND m.namespace = ?"
-        params.append(args.ns)
-    sql += f" ORDER BY {order_by} LIMIT ?"
-    params.append(args.limit)
-
-    rows = conn.execute(sql, params).fetchall()
-    if not rows:
-        print("No memories qualify for promotion.")
-        return
-
-    print(f"=== Archival Memory Promotion Candidates (Sorted by {args.by}, limit={args.limit}) ===")
-    for idx, r in enumerate(rows, 1):
-        ttl_part = f" | ttl={r['ttl_days']}d" if r["ttl_days"] is not None else ""
-        print(f"{idx}. [{r['namespace']}/{r['kind']}] '{r['topic']}' (hits: {r['access_count']}{ttl_part} | updated: {r['updated_at']})")
-    print()
-
-    grouped: dict[str, list[tuple[str, str]]] = {}
-    for r in rows:
-        ns = r["namespace"]
-        grouped.setdefault(ns, []).append((r["topic"], make_summary(r["content"], r["tags"])))
-
-    print("=== Semantic Directory Snippet (Ready for CORE.md) ===")
-    for ns, items in grouped.items():
-        formatted_items = ", ".join([f"`{topic}` ({summ})" for topic, summ in items])
-        ns_label = f"`{ns}` / `orchestrator`" if ns == "global" else f"`{ns}`"
-        print(f"- **{ns_label}:** Tópicos indexados em L2: {formatted_items}")
-
-
-def cmd_link(args: argparse.Namespace) -> None:
-    if ":" not in args.source:
-        sys.exit(f"Error: source '{args.source}' must be in '<namespace>:<topic>' format")
-    if ":" not in args.target:
-        sys.exit(f"Error: target '{args.target}' must be in '<namespace>:<topic>' format")
-    src_ns, src_topic = args.source.split(":", 1)
-    dst_ns, dst_topic = args.target.split(":", 1)
-    validate_namespace(src_ns)
-    validate_namespace(dst_ns)
-    conn = get_conn()
-    src_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (src_ns, src_topic)).fetchone()
-    if not src_row:
-        sys.exit(f"Error: source memory not found: [{src_ns}] topic='{src_topic}'")
-    dst_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (dst_ns, dst_topic)).fetchone()
-    if not dst_row:
-        sys.exit(f"Error: target memory not found: [{dst_ns}] topic='{dst_topic}'")
-
-    relation = args.relation.strip().upper()
-    ts = now_iso()
-    with conn:
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (src_row["id"], dst_row["id"], relation, ts),
-        )
-    print(f"[OK] Linked [{src_ns}:{src_topic}] --({relation})--> [{dst_ns}:{dst_topic}]")
-
-
-def cmd_defer(args: argparse.Namespace) -> None:
-    validate_namespace(args.namespace)
-    conn = get_conn()
-    ts = now_iso()
-    with conn:
-        cur = conn.execute(
-            """
-            INSERT INTO prospective_tasks (namespace, trigger_cond, action, status, created_at)
-            VALUES (?, ?, ?, 'pending', ?)
-            """,
-            (args.namespace, args.trigger_cond, args.action, ts),
-        )
-    task_id = cur.lastrowid
-    print(f"[OK] Deferred prospective task #{task_id} [{args.namespace}]: [{args.trigger_cond}] -> {args.action}")
-
-
-def cmd_due(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    conn = get_conn()
-    if args.ns:
-        rows = conn.execute(
-            "SELECT id, namespace, trigger_cond, action, created_at FROM prospective_tasks WHERE status = 'pending' AND namespace = ? ORDER BY id",
-            (args.ns,),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT id, namespace, trigger_cond, action, created_at FROM prospective_tasks WHERE status = 'pending' ORDER BY id"
-        ).fetchall()
-    if not rows:
-        print("(No pending prospective tasks)" if not args.ns else f"(No pending prospective tasks in namespace '{args.ns}')")
-        return
-    print(f"=== Pending Prospective Tasks ({len(rows)}) ===")
-    for r in rows:
-        print(f"#{r['id']} [{r['namespace']}] [{r['trigger_cond']}] -> {r['action']} (created: {r['created_at']})")
-
-
-def cmd_done(args: argparse.Namespace) -> None:
-    conn = get_conn()
-    ts = now_iso()
-    with conn:
-        cur = conn.execute(
-            "UPDATE prospective_tasks SET status = 'done', completed_at = ? WHERE id = ? AND status = 'pending'",
-            (ts, args.task_id),
-        )
-    if cur.rowcount:
-        print(f"[OK] Completed prospective task #{args.task_id} at {ts}")
-    else:
-        print(f"[WARN] Prospective task #{args.task_id} not found or already completed")
-
-
-def cmd_syn(args: argparse.Namespace) -> None:
-    conn = get_conn()
-    if args.action == "list":
-        rows = conn.execute("SELECT term, expanded FROM synonyms ORDER BY term").fetchall()
-        if not rows:
-            print("(No synonyms configured)")
-            return
-        print(f"=== Dynamic FTS5 Synonyms ({len(rows)} terms) ===")
-        for r in rows:
-            print(f"- {r['term']} -> {r['expanded']}")
-    elif args.action == "add":
-        if not args.term or not args.synonyms:
-            sys.exit("Error: 'syn add' requires <term> and \"<syn1,syn2,...>\"")
-        term = args.term.strip().lower()
-        expanded_list = [s.strip().lower() for s in args.synonyms.split(",") if s.strip()]
-        if not expanded_list:
-            sys.exit("Error: no valid synonyms provided in expanded list")
-        expanded_str = ", ".join(expanded_list)
-        with conn:
+        effective_ttl = new_ttl if update_ttl else row["ttl_days"]
+        with immediate_transaction(conn):
             conn.execute(
-                "INSERT INTO synonyms (term, expanded) VALUES (?, ?) ON CONFLICT(term) DO UPDATE SET expanded = excluded.expanded",
-                (term, expanded_str),
+                "UPDATE memories SET updated_at = ?, ttl_days = ? WHERE id = ?",
+                (ts, effective_ttl, row["id"]),
             )
-        print(f"[OK] Dynamic synonym saved: '{term}' -> '{expanded_str}'")
+        return effective_ttl
 
+    def get_by_topic(self, namespace: str, topic: str, increment_hit: bool = True) -> tuple[MemoryRecord, Sequence[SemanticEdge]]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+            (namespace, topic),
+        ).fetchone()
+        if not row:
+            raise ResourceNotFoundError(f"Not found: [{namespace}] topic='{topic}'")
 
-def cmd_recall_error(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    conn = get_conn()
+        if increment_hit:
+            with immediate_transaction(conn):
+                conn.execute("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", (row["id"],))
 
-    raw_words = re.findall(r"[a-zA-Z0-9_]{3,}", args.error_snippet)
-    seen = set()
-    words = []
-    for w in raw_words:
-        wl = w.lower()
-        if wl not in seen:
-            seen.add(wl)
-            words.append(wl)
+        rec = self._row_to_record(row)
+        if increment_hit:
+            rec = MemoryRecord(
+                id=rec.id,
+                namespace=rec.namespace,
+                kind=rec.kind,
+                topic=rec.topic,
+                content=rec.content,
+                tags=rec.tags,
+                access_count=rec.access_count + 1,
+                ttl_days=rec.ttl_days,
+                created_at=rec.created_at,
+                updated_at=rec.updated_at,
+            )
 
-    if not words:
-        sys.exit("Error: no searchable keywords (length >= 3) found in error snippet")
-
-    clauses = [format_fts_term(w) for w in words]
-    fts_query = " OR ".join(clauses)
-
-    sql = """
-        SELECT m.id, m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.updated_at,
-               (bm25(memories_fts, 5.0, 1.0, 2.0, 0.5) * (1.0 + 0.15 * MIN(m.access_count, 30)) / (1.0 + 0.02 * MAX(0.0, julianday('now') - julianday(m.updated_at)))) AS hybrid_score,
-               CASE WHEN m.kind IN ('learning', 'playbook') THEN 0 ELSE 1 END AS kind_priority
-        FROM memories_fts
-        JOIN memories m ON m.id = memories_fts.rowid
-        WHERE memories_fts MATCH ?
-    """
-    params: list = [fts_query]
-    if args.ns:
-        sql += " AND m.namespace = ?"
-        params.append(args.ns)
-    sql += " ORDER BY kind_priority ASC, hybrid_score ASC, m.updated_at DESC LIMIT ?"
-    params.append(args.limit)
-
-    rows = conn.execute(sql, params).fetchall()
-    if not rows:
-        print(f"No error solutions found matching query keywords: {', '.join(words[:10])}")
-        return
-
-    ids = [r["id"] for r in rows]
-    with conn:
-        conn.executemany("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", [(i,) for i in ids])
-
-    print(f"=== Episodic Error Recall (Matched {len(rows)} record(s)) ===")
-    for r in rows:
-        ttl_part = f" | ttl={r['ttl_days']}d" if r["ttl_days"] is not None else ""
-        print(f"\n=== [{r['namespace']}/{r['kind']}] {r['topic']} (tags: {r['tags'] or '-'} | updated: {r['updated_at']}{ttl_part} | hits: {r['access_count'] + 1}) ===")
-        stale_warn = check_stale(r["updated_at"], r["ttl_days"])
-        if stale_warn:
-            print(stale_warn)
-        print(r["content"])
-
-
-def cmd_check_core(_args: argparse.Namespace) -> None:
-    if not os.path.exists(CORE_PATH):
-        sys.exit(f"Error: CORE.md not found at {CORE_PATH}")
-
-    with open(CORE_PATH, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    line_count = len(lines)
-    status = "OK" if line_count <= 60 else "EXCEEDED"
-    remaining = 60 - line_count
-
-    print("=== CORE.md Working Memory Budget ===")
-    print(f"Status: {status} ({line_count}/60 lines used, {remaining} lines remaining)")
-    print(f"Path: {CORE_PATH}")
-
-    conn = get_conn()
-    due_tasks = conn.execute(
-        "SELECT id, namespace, trigger_cond, action, created_at FROM prospective_tasks WHERE status = 'pending' ORDER BY id"
-    ).fetchall()
-    print("\n=== Pending Prospective Tasks ===")
-    if not due_tasks:
-        print("(No pending prospective tasks)")
-    else:
-        for t in due_tasks:
-            print(f"- #{t['id']} [{t['namespace']}]: [{t['trigger_cond']}] -> {t['action']} (created: {t['created_at']})")
-
-
-def parse_frontmatter(fm_text: str) -> dict:
-    data: dict = {
-        "namespace": "",
-        "topic": "",
-        "kind": "fact",
-        "tags": "",
-        "access_count": 0,
-        "ttl_days": None,
-        "created_at": None,
-        "updated_at": None,
-        "links": [],
-    }
-    in_links = False
-    for line in fm_text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-
-        if in_links:
-            if stripped.startswith("- "):
-                link_item = stripped[2:].strip().strip("\"'")
-                data["links"].append(link_item)
-                continue
-            elif not line.startswith(" ") and not line.startswith("\t"):
-                in_links = False
-
-        if ":" in stripped:
-            key, val = stripped.split(":", 1)
-            key = key.strip()
-            val = val.strip()
-
-            if key == "links":
-                if val == "[]":
-                    data["links"] = []
-                    in_links = False
-                else:
-                    in_links = True
-                continue
-
-            # Strip outer quotes and unescape
-            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                val = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-
-            if key == "namespace":
-                data["namespace"] = val
-            elif key == "topic":
-                data["topic"] = val
-            elif key == "kind":
-                data["kind"] = val
-            elif key == "tags":
-                data["tags"] = val
-            elif key == "access_count":
-                try:
-                    data["access_count"] = int(val)
-                except ValueError:
-                    data["access_count"] = 0
-            elif key == "ttl_days":
-                if val.lower() in ("null", "none", "", "~"):
-                    data["ttl_days"] = None
-                else:
-                    try:
-                        data["ttl_days"] = int(val)
-                    except ValueError:
-                        data["ttl_days"] = None
-            elif key == "created_at":
-                data["created_at"] = val
-            elif key == "updated_at":
-                data["updated_at"] = val
-
-    return data
-
-
-def cmd_export_md(args: argparse.Namespace) -> None:
-    if args.ns:
-        validate_namespace(args.ns)
-    wiki_dir = args.dir if args.dir else os.path.join(MEM_DIR, "wiki")
-    os.makedirs(wiki_dir, exist_ok=True)
-    conn = get_conn()
-
-    sql = """
-        SELECT id, namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at
-        FROM memories
-    """
-    params: list = []
-    if args.ns:
-        sql += " WHERE namespace = ?"
-        params.append(args.ns)
-    sql += " ORDER BY namespace, topic"
-
-    rows = conn.execute(sql, params).fetchall()
-    if not rows:
-        print("No memories to export." if not args.ns else f"No memories to export in namespace '{args.ns}'.")
-        return
-
-    exported_count = 0
-    grouped_for_index: dict[str, list[dict]] = {}
-    exported_filepaths: set[str] = set()
-
-    for r in rows:
-        m_id = r["id"]
-        ns = r["namespace"]
-        topic = r["topic"]
-        ns_folder = ns.replace(":", "_")
-        ns_dir = os.path.join(wiki_dir, ns_folder)
-        os.makedirs(ns_dir, exist_ok=True)
-
-        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", topic).strip("_")
-        if not slug:
-            slug = "memory"
-        filename = f"{slug}.md"
-        filepath = os.path.join(ns_dir, filename)
-        exported_filepaths.add(os.path.abspath(filepath))
-
-        # Outgoing edges
         out_edges = conn.execute(
             """
             SELECT e.relation, m.namespace, m.topic
@@ -982,10 +661,8 @@ def cmd_export_md(args: argparse.Namespace) -> None:
             WHERE e.source_id = ?
             ORDER BY e.relation, m.namespace, m.topic
             """,
-            (m_id,),
+            (row["id"],),
         ).fetchall()
-
-        # Incoming edges
         in_edges = conn.execute(
             """
             SELECT e.relation, m.namespace, m.topic
@@ -994,348 +671,947 @@ def cmd_export_md(args: argparse.Namespace) -> None:
             WHERE e.target_id = ?
             ORDER BY e.relation, m.namespace, m.topic
             """,
-            (m_id,),
+            (row["id"],),
         ).fetchall()
 
-        # Links in frontmatter (outgoing links)
-        if not out_edges:
-            links_yaml = "links: []"
+        edges: list[SemanticEdge] = [
+            SemanticEdge(relation=e["relation"], namespace=e["namespace"], topic=e["topic"], direction="out")
+            for e in out_edges
+        ]
+        edges.extend(
+            SemanticEdge(relation=e["relation"], namespace=e["namespace"], topic=e["topic"], direction="in")
+            for e in in_edges
+        )
+        return rec, edges
+
+    def search_fts(self, fts_query: str, namespace: str | None, limit: int, prioritize_episodic: bool = False) -> Sequence[MemoryRecord]:
+        conn = self._get_conn()
+        # memories_fts columns: topic (5.0), content (1.0), tags (3.0), namespace (0.5)
+        # SQLite bm25() returns negative values where more negative = better match.
+        # Inverting via (-1.0 * bm25(...)) yields a strictly positive relevance score ordered DESC.
+        sql = """
+            SELECT m.id, m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.created_at, m.updated_at,
+                   (MAX(0.0001, -1.0 * bm25(memories_fts, 5.0, 1.0, 3.0, 0.5))
+                    * (1.0 + 0.15 * MIN(m.access_count, 30))
+                    / (1.0 + 0.02 * MAX(0.0, julianday('now') - julianday(m.updated_at)))) AS relevance_score,
+                   CASE WHEN m.kind IN ('learning', 'playbook') THEN 1 ELSE 0 END AS episodic_boost
+            FROM memories_fts
+            JOIN memories m ON m.id = memories_fts.rowid
+            WHERE memories_fts MATCH ?
+        """
+        params: list[object] = [fts_query]
+        if namespace:
+            sql += " AND m.namespace = ?"
+            params.append(namespace)
+
+        if prioritize_episodic:
+            sql += " ORDER BY episodic_boost DESC, relevance_score DESC, m.updated_at DESC LIMIT ?"
         else:
-            links_lines = ["links:"]
-            for e in out_edges:
-                links_lines.append(f'  - "{e["relation"]} -> {e["namespace"]}:{e["topic"]}"')
-            links_yaml = "\n".join(links_lines)
+            sql += " ORDER BY relevance_score DESC, m.updated_at DESC LIMIT ?"
+        params.append(limit)
 
-        ttl_yaml = str(r["ttl_days"]) if r["ttl_days"] is not None else "null"
-        clean_tags = (r["tags"] or "").replace('\\', '\\\\').replace('"', '\\"')
-        clean_topic = topic.replace('\\', '\\\\').replace('"', '\\"')
-        clean_ns = ns.replace('\\', '\\\\').replace('"', '\\"')
+        rows = conn.execute(sql, params).fetchall()
+        if not rows:
+            return []
 
-        frontmatter = f"""---
-namespace: "{clean_ns}"
-topic: "{clean_topic}"
-kind: "{r['kind']}"
-tags: "{clean_tags}"
-access_count: {r['access_count']}
-ttl_days: {ttl_yaml}
-created_at: "{r['created_at']}"
-updated_at: "{r['updated_at']}"
-{links_yaml}
----"""
+        ids = [(r["id"],) for r in rows]
+        with immediate_transaction(conn):
+            conn.executemany("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", ids)
 
-        # Semantic links section
-        semantic_section = ""
-        if out_edges or in_edges:
-            s_lines = ["\n## 🔗 Links Semânticos"]
-            for e in out_edges:
-                s_lines.append(f"- **{e['relation']}** -> [[{e['namespace']}/{e['topic']}]]")
-            for e in in_edges:
-                s_lines.append(f"- *referenced by* **{e['relation']}** <- [[{e['namespace']}/{e['topic']}]]")
-            semantic_section = "\n" + "\n".join(s_lines)
+        return [
+            MemoryRecord(
+                id=r["id"],
+                namespace=r["namespace"],
+                kind=r["kind"],
+                topic=r["topic"],
+                content=r["content"],
+                tags=r["tags"] or "",
+                access_count=r["access_count"] + 1,
+                ttl_days=r["ttl_days"],
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+                score=float(r["relevance_score"]),
+            )
+            for r in rows
+        ]
 
-        file_content = f"{frontmatter}\n\n# {topic}\n\n{r['content'].strip()}{semantic_section}\n"
+    def list_records(self, namespace: str | None) -> Sequence[MemoryRecord]:
+        conn = self._get_conn()
+        if namespace:
+            rows = conn.execute(
+                "SELECT * FROM memories WHERE namespace = ? ORDER BY namespace, topic",
+                (namespace,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM memories ORDER BY namespace, topic").fetchall()
+        return [self._row_to_record(r) for r in rows]
 
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(file_content)
+    def delete_record(self, namespace: str, topic: str) -> bool:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            cur = conn.execute("DELETE FROM memories WHERE namespace = ? AND topic = ?", (namespace, topic))
+        return cur.rowcount > 0
 
-        exported_count += 1
-        rel_link = f"{ns_folder}/{filename}"
-        grouped_for_index.setdefault(ns, []).append({
-            "topic": topic,
-            "kind": r["kind"],
-            "tags": r["tags"] or "",
-            "link": rel_link,
-            "updated_at": r["updated_at"],
-            "summary": make_summary(r["content"], r["tags"] or ""),
-        })
+    def get_promotion_candidates(self, namespace: str | None, by: str, min_hits: int, limit: int) -> Sequence[MemoryRecord]:
+        conn = self._get_conn()
+        order_by = "m.access_count DESC, m.updated_at DESC" if by == "hits" else "m.updated_at DESC, m.access_count DESC"
+        sql = "SELECT * FROM memories m WHERE m.access_count >= ?"
+        params: list[object] = [min_hits]
+        if namespace:
+            sql += " AND m.namespace = ?"
+            params.append(namespace)
+        sql += f" ORDER BY {order_by} LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_record(r) for r in rows]
 
-    # Write INDEX.md
-    index_path = os.path.join(wiki_dir, "INDEX.md")
-    index_lines = [
-        "# 📚 Antigravity Memory Wiki Index",
-        "",
-        f"> Generated on: {now_iso()} | Total memories: {exported_count}",
-        "",
-        "## Namespaces",
-    ]
-    for ns, items in grouped_for_index.items():
-        ns_anchor = ns.replace(":", "").replace("_", "-").lower()
-        index_lines.append(f"- [`{ns}`](#{ns_anchor}) ({len(items)} memories)")
+    def link_topics(self, src_ns: str, src_topic: str, relation: str, dst_ns: str, dst_topic: str, ts: str) -> None:
+        conn = self._get_conn()
+        src_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (src_ns, src_topic)).fetchone()
+        if not src_row:
+            raise ResourceNotFoundError(f"Source memory not found: [{src_ns}] topic='{src_topic}'")
+        dst_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (dst_ns, dst_topic)).fetchone()
+        if not dst_row:
+            raise ResourceNotFoundError(f"Target memory not found: [{dst_ns}] topic='{dst_topic}'")
 
-    index_lines.append("")
-    for ns, items in grouped_for_index.items():
-        index_lines.append(f"## `{ns}`")
-        index_lines.append("")
-        for it in items:
-            tags_str = f" | tags: {it['tags']}" if it['tags'] else ""
-            index_lines.append(f"- [{it['topic']}]({it['link']}) (`{it['kind']}`{tags_str}) — {it['summary']}")
-        index_lines.append("")
-
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(index_lines))
-
-    # Clean up obsolete .md files if full export (not filtered by --ns)
-    if not args.ns:
-        for root, _, files in os.walk(wiki_dir):
-            for f in files:
-                if f.endswith(".md"):
-                    fp = os.path.abspath(os.path.join(root, f))
-                    if fp not in exported_filepaths and fp != os.path.abspath(index_path):
-                        try:
-                            os.remove(fp)
-                        except OSError:
-                            pass
-        # Remove empty dirs
-        for root, dirs, _ in os.walk(wiki_dir, topdown=False):
-            for d in dirs:
-                dp = os.path.join(root, d)
-                try:
-                    if not os.listdir(dp):
-                        os.rmdir(dp)
-                except OSError:
-                    pass
-
-    print(f"[OK] Exported {exported_count} memories to {wiki_dir}")
-    print(f"[OK] Generated index at {index_path}")
-
-
-def cmd_import_md(args: argparse.Namespace) -> None:
-    wiki_dir = args.dir if args.dir else os.path.join(MEM_DIR, "wiki")
-    if not os.path.isdir(wiki_dir):
-        sys.exit(f"Error: import directory not found: {wiki_dir}")
-
-    conn = get_conn()
-    ts = now_iso()
-    imported_records = []
-    all_links = []
-
-    for root, _, files in os.walk(wiki_dir):
-        for f in files:
-            if not f.endswith(".md") or f == "INDEX.md":
-                continue
-            filepath = os.path.join(root, f)
-            with open(filepath, "r", encoding="utf-8") as fp:
-                raw_text = fp.read()
-
-            m = re.match(r"^\s*---\s*\n(.*?)\n---\s*\n(.*)$", raw_text, re.DOTALL)
-            if not m:
-                continue
-
-            fm_text = m.group(1)
-            body = m.group(2)
-
-            data = parse_frontmatter(fm_text)
-            ns = data["namespace"]
-            topic = data["topic"]
-            if not ns or not topic:
-                continue
-            if not is_valid_namespace(ns):
-                print(f"[WARN] Skipping {filepath}: invalid namespace '{ns}'")
-                continue
-
-            # Clean body: strip Links Semanticos and # <topic> header
-            body_no_links = re.split(r"\n##\s+🔗\s+Links Semânticos", body)[0]
-            clean_body = re.sub(r"^\s*#\s+[^\n]*\n", "", body_no_links, count=1).strip()
-
-            kind = data["kind"] if data["kind"] in VALID_KINDS else "fact"
-            created_at = data["created_at"] or ts
-            updated_at = data["updated_at"] or ts
-            access_count = data["access_count"]
-            ttl_days = data["ttl_days"]
-            tags = data["tags"]
-
-            imported_records.append((ns, kind, topic, clean_body, tags, access_count, ttl_days, created_at, updated_at))
-            for link_str in data["links"]:
-                all_links.append((ns, topic, link_str))
-
-    if not imported_records:
-        print(f"No valid markdown memory files found in {wiki_dir}")
-        return
-
-    with conn:
-        for rec in imported_records:
+        with immediate_transaction(conn):
             conn.execute(
                 """
-                INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(namespace, topic) DO UPDATE SET
-                    kind = excluded.kind,
-                    content = excluded.content,
-                    tags = excluded.tags,
-                    access_count = excluded.access_count,
-                    ttl_days = excluded.ttl_days,
-                    created_at = excluded.created_at,
-                    updated_at = excluded.updated_at
+                INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, created_at)
+                VALUES (?, ?, ?, ?)
                 """,
-                rec,
+                (src_row["id"], dst_row["id"], relation, ts),
             )
 
-    # Restore links
-    restored_links_count = 0
-    with conn:
-        for src_ns, src_topic, link_str in all_links:
-            if "->" not in link_str:
-                continue
-            rel_part, target_part = link_str.split("->", 1)
-            rel = rel_part.strip().upper()
-            target_clean = target_part.strip()
-            if ":" not in target_clean:
-                continue
-            dst_ns, dst_topic = target_clean.split(":", 1)
-            src_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (src_ns, src_topic)).fetchone()
-            dst_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (dst_ns, dst_topic)).fetchone()
-            if src_row and dst_row:
-                cur = conn.execute(
+    def defer_task(self, namespace: str, trigger_cond: str, action: str, ts: str) -> int:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            cur = conn.execute(
+                """
+                INSERT INTO prospective_tasks (namespace, trigger_cond, action, status, created_at)
+                VALUES (?, ?, ?, 'pending', ?)
+                """,
+                (namespace, trigger_cond, action, ts),
+            )
+        return int(cur.lastrowid)
+
+    def list_due_tasks(self, namespaces: Sequence[str] | None = None) -> Sequence[ProspectiveTask]:
+        conn = self._get_conn()
+        if namespaces is not None:
+            if not namespaces:
+                return []
+            placeholders = ",".join("?" * len(namespaces))
+            rows = conn.execute(
+                f"SELECT id, namespace, trigger_cond, action, status, created_at, completed_at FROM prospective_tasks WHERE status = 'pending' AND namespace IN ({placeholders}) ORDER BY id",
+                list(namespaces),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, namespace, trigger_cond, action, status, created_at, completed_at FROM prospective_tasks WHERE status = 'pending' ORDER BY id"
+            ).fetchall()
+        return [
+            ProspectiveTask(
+                id=r["id"],
+                namespace=r["namespace"],
+                trigger_cond=r["trigger_cond"],
+                action=r["action"],
+                status=r["status"],
+                created_at=r["created_at"],
+                completed_at=r["completed_at"],
+            )
+            for r in rows
+        ]
+
+    def complete_task(self, task_id: int, ts: str) -> bool:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            cur = conn.execute(
+                "UPDATE prospective_tasks SET status = 'done', completed_at = ? WHERE id = ? AND status = 'pending'",
+                (ts, task_id),
+            )
+        return cur.rowcount > 0
+
+    def get_synonyms(self) -> dict[str, list[str]]:
+        conn = self._get_conn()
+        syn_map: dict[str, list[str]] = {}
+        rows = conn.execute("SELECT term, expanded FROM synonyms ORDER BY term").fetchall()
+        for r in rows:
+            term = r["term"].strip().lower()
+            items = [s.strip().lower() for s in r["expanded"].split(",") if s.strip()]
+            if items:
+                syn_map[term] = items
+        return syn_map
+
+    def upsert_synonym(self, term: str, expanded: str) -> None:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            conn.execute(
+                "INSERT INTO synonyms (term, expanded) VALUES (?, ?) ON CONFLICT(term) DO UPDATE SET expanded = excluded.expanded",
+                (term, expanded),
+            )
+
+    def get_all_for_export(self, namespace: str | None) -> Sequence[tuple[MemoryRecord, Sequence[SemanticEdge], Sequence[SemanticEdge]]]:
+        conn = self._get_conn()
+        records = self.list_records(namespace)
+        results: list[tuple[MemoryRecord, Sequence[SemanticEdge], Sequence[SemanticEdge]]] = []
+        for rec in records:
+            out_rows = conn.execute(
+                """
+                SELECT e.relation, m.namespace, m.topic
+                FROM memory_edges e
+                JOIN memories m ON e.target_id = m.id
+                WHERE e.source_id = ?
+                ORDER BY e.relation, m.namespace, m.topic
+                """,
+                (rec.id,),
+            ).fetchall()
+            in_rows = conn.execute(
+                """
+                SELECT e.relation, m.namespace, m.topic
+                FROM memory_edges e
+                JOIN memories m ON e.source_id = m.id
+                WHERE e.target_id = ?
+                ORDER BY e.relation, m.namespace, m.topic
+                """,
+                (rec.id,),
+            ).fetchall()
+            out_edges = [SemanticEdge(e["relation"], e["namespace"], e["topic"], "out") for e in out_rows]
+            in_edges = [SemanticEdge(e["relation"], e["namespace"], e["topic"], "in") for e in in_rows]
+            results.append((rec, out_edges, in_edges))
+        return results
+
+    def bulk_import(self, docs: Sequence[WikiDocument], default_ts: str) -> tuple[int, int]:
+        conn = self._get_conn()
+        restored_links = 0
+        with immediate_transaction(conn):
+            for d in docs:
+                c_at = d.created_at or default_ts
+                u_at = d.updated_at or default_ts
+                conn.execute(
                     """
-                    INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, created_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(namespace, topic) DO UPDATE SET
+                        kind = excluded.kind,
+                        content = excluded.content,
+                        tags = excluded.tags,
+                        access_count = excluded.access_count,
+                        ttl_days = excluded.ttl_days,
+                        created_at = excluded.created_at,
+                        updated_at = excluded.updated_at
                     """,
-                    (src_row["id"], dst_row["id"], rel, ts),
+                    (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, c_at, u_at),
                 )
-                if cur.rowcount:
-                    restored_links_count += 1
 
-    print(f"[OK] Imported {len(imported_records)} memories from {wiki_dir}")
-    print(f"[OK] Restored {restored_links_count} semantic links into memory_edges")
+            for d in docs:
+                for link_str in d.links:
+                    if "->" not in link_str:
+                        continue
+                    rel_part, target_part = link_str.split("->", 1)
+                    rel = rel_part.strip().upper()
+                    target_clean = target_part.strip()
+                    if ":" not in target_clean:
+                        continue
+                    dst_ns, dst_topic = target_clean.split(":", 1)
+                    src_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (d.namespace, d.topic)).fetchone()
+                    dst_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (dst_ns, dst_topic)).fetchone()
+                    if src_row and dst_row:
+                        cur = conn.execute(
+                            """
+                            INSERT OR IGNORE INTO memory_edges (source_id, target_id, relation, created_at)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (src_row["id"], dst_row["id"], rel, default_ts),
+                        )
+                        if cur.rowcount:
+                            restored_links += 1
+
+        return len(docs), restored_links
+
+    def compute_stats(self, stale_checker: Callable[[str, int | None], str | None]) -> StorageStats:
+        conn = self._get_conn()
+        ns_rows = conn.execute(
+            "SELECT namespace, COUNT(*) as cnt, SUM(access_count) as hits, SUM(LENGTH(content)) as bytes FROM memories GROUP BY namespace ORDER BY namespace"
+        ).fetchall()
+        ns_stats = [
+            NamespaceStat(
+                namespace=r["namespace"],
+                count=r["cnt"],
+                hits=r["hits"] or 0,
+                total_bytes=r["bytes"] or 0,
+            )
+            for r in ns_rows
+        ]
+
+        monitored = conn.execute("SELECT updated_at, ttl_days FROM memories WHERE ttl_days IS NOT NULL").fetchall()
+        stale_cnt = sum(1 for m in monitored if stale_checker(m["updated_at"], m["ttl_days"]) is not None)
+
+        pending_cnt = conn.execute("SELECT COUNT(*) FROM prospective_tasks WHERE status = 'pending'").fetchone()[0]
+        total_tasks_cnt = conn.execute("SELECT COUNT(*) FROM prospective_tasks").fetchone()[0]
+        edges_cnt = conn.execute("SELECT COUNT(*) FROM memory_edges").fetchone()[0]
+        syn_cnt = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
+
+        top_rows = conn.execute(
+            "SELECT * FROM memories ORDER BY access_count DESC, updated_at DESC LIMIT 5"
+        ).fetchall()
+        top_records = [self._row_to_record(r) for r in top_rows]
+
+        return StorageStats(
+            namespaces=ns_stats,
+            stale_count=stale_cnt,
+            ttl_monitored_count=len(monitored),
+            pending_tasks_count=pending_cnt,
+            total_tasks_count=total_tasks_cnt,
+            edges_count=edges_cnt,
+            synonyms_count=syn_cnt,
+            top_records=top_records,
+        )
 
 
-def cmd_init(args: argparse.Namespace) -> None:
-    conn = get_conn()
-    init_db(conn)
-    ts = now_iso()
-    user_name = args.user if args.user is not None else "[UNCONFIGURED]"
-    user_lang = args.lang if args.lang is not None else "pt-BR"
-    workspace = args.workspace if args.workspace is not None else "~/workspace"
+class MarkdownWikiAdapter:
+    @staticmethod
+    def _safe_filename(topic: str, used_names: set[str]) -> str:
+        slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", topic).strip("_") or "memory"
+        candidate = f"{slug}.md"
+        if candidate.lower() in used_names:
+            short_hash = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:6]
+            candidate = f"{slug}_{short_hash}.md"
+        used_names.add(candidate.lower())
+        return candidate
 
-    foundational = [
-        (
-            "global",
-            "decision",
-            "agent-memory-architecture",
-            "Arquitetura de Memoria Hibrida 2-Tier com 7-Memory Evolution (Letta/MemGPT, CoALA, Mem0, Zep/Graphiti + SQLite FTS5): 1) Working Memory (Tier 1 Hot) em CORE.md (<=60 linhas, guardrail via 'mem check-core'); 2) Declarative Memory (Tier 2 facts, decisions, invariants com Semantic Freshness/TTL e 'mem verify'); 3) Episodic Memory (learnings de bugs/edge cases com recall rapido via 'mem recall-error'); 4) Procedural Memory (receitas reutilizaveis com kind 'playbook'); 5) Semantic Memory Graph (relacoes direcionadas via 'mem link' e visualizacao contextual em 'mem get'); 6) Prospective Memory (pendencias/gatilhos persistentes via 'mem defer', 'mem due', 'mem done' com alertas ativos em search/get); 7) Retrieval Memory (ranking hibrido BM25 escalado por frequencia de acesso e decaimento temporal + expansao dinamica de sinonimos em 'mem syn'); 8) Wiki Markdown Interop ('mem export-md' e 'mem import-md' com YAML frontmatter e WikiLinks [[ns/topic]]). Shutdown Write-on-Delta.",
-            "memory,architecture,sqlite,fts5,7-memory-evolution,graph,prospective,ttl,wiki",
-        ),
-        (
-            "global",
-            "decision",
-            "dag-parallel-model-orchestration",
-            "O Orchestrator opera como DAG Scheduler e Auto-Model Router: 1) Decomposicao Atomica (quebra pedidos monoliticos em micro-tarefas ortogonais). 2) Paralelismo Maximo Fan-Out (dispara todas as subtarefas sem dependencia simultaneamente no mesmo turno via invoke_subagent/send_message). 3) Tiered Model Orchestration (seleciona automaticamente Model='flash_lite' para IO/inspecao, 'flash' para operacoes padrao, e 'pro' apenas para nos criticos de raciocinio profundo). 4) Comunicacao Maquina-Maquina telegrafica com Differential Context Passing.",
-            "orchestrator,dag,parallelism,model-routing,token-economy",
-        ),
-        (
-            "global",
-            "invariant",
-            "zero-assumptions-mandatory-delegation",
-            "Lei Zero Inviolavel (Protocolo Zero Assumptions): Nenhum agente pode assumir, deduzir ou escolher silenciosamente em cenarios de duvida, ambiguidade ou decisao. Toda duvida/decisao deve ser obrigatoriamente delegada ao usuario (identificado em CORE.md / global:user-profile), apresentando opcoes estruturadas e recomendacao tecnica fundamentada.",
-            "zero-assumptions,delegation,invariant,lei-zero",
-        ),
-        (
-            "global",
-            "invariant",
-            "no-autonomous-git-commit-push",
-            "Proibicao Absoluta de Git Commit/Push Autonomo: Nenhum agente ou orquestrador tem permissao para executar git commit ou git push por iniciativa propria. Exige autorizacao previa e expressa do usuario (identificado em CORE.md).",
-            "git,commit,push,prohibition,invariant",
-        ),
-        (
-            "global",
-            "invariant",
-            "user-profile",
-            f"Identidade e perfil do usuario ativo (Single Source of Truth em memoria L1 CORE.md e L2 archival.db): Nome: {user_name}. Idioma: {user_lang}. O orchestrator deve saudar o usuario pelo nome registrado aqui e em CORE.md. Dados de identidade do usuario NUNCA devem ficar hardcoded em arquivos procedurais (GEMINI.md, COMMON_INSTRUCTIONS.md, AGENT.md).",
-            "user,profile,identity,invariant",
-        ),
-    ]
+    @staticmethod
+    def parse_frontmatter(fm_text: str) -> WikiDocument:
+        doc = WikiDocument(namespace="", topic="")
+        in_links = False
+        for line in fm_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
 
-    with conn:
-        for ns, kind, topic, content, tags in foundational:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
-                """,
-                (ns, kind, topic, content, tags, ts, ts),
+            if in_links:
+                if stripped.startswith("- "):
+                    link_item = stripped[2:].strip().strip("\"'")
+                    doc.links.append(link_item)
+                    continue
+                elif not line.startswith((" ", "\t")):
+                    in_links = False
+
+            if ":" in stripped:
+                key, val = stripped.split(":", 1)
+                key = key.strip()
+                val = val.strip()
+
+                if key == "links":
+                    if val == "[]":
+                        doc.links = []
+                        in_links = False
+                    else:
+                        in_links = True
+                    continue
+
+                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                    val = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+
+                if key == "namespace":
+                    doc.namespace = val
+                elif key == "topic":
+                    doc.topic = val
+                elif key == "kind":
+                    doc.kind = val if val in VALID_KINDS else "fact"
+                elif key == "tags":
+                    doc.tags = val
+                elif key == "access_count":
+                    try:
+                        doc.access_count = int(val)
+                    except ValueError:
+                        doc.access_count = 0
+                elif key == "ttl_days":
+                    if val.lower() in ("null", "none", "", "~"):
+                        doc.ttl_days = None
+                    else:
+                        try:
+                            doc.ttl_days = int(val)
+                        except ValueError:
+                            doc.ttl_days = None
+                elif key == "created_at":
+                    doc.created_at = val
+                elif key == "updated_at":
+                    doc.updated_at = val
+        return doc
+
+    @classmethod
+    def export_wiki(
+        cls,
+        wiki_dir: str,
+        items: Sequence[tuple[MemoryRecord, Sequence[SemanticEdge], Sequence[SemanticEdge]]],
+        is_full_export: bool,
+        now_iso: str,
+    ) -> tuple[int, str]:
+        os.makedirs(wiki_dir, exist_ok=True)
+        grouped_for_index: dict[str, list[dict[str, str]]] = {}
+        exported_filepaths: set[str] = set()
+        used_names_per_ns: dict[str, set[str]] = {}
+
+        for rec, out_edges, in_edges in items:
+            ns_folder = rec.namespace.replace(":", "_")
+            ns_dir = os.path.join(wiki_dir, ns_folder)
+            os.makedirs(ns_dir, exist_ok=True)
+
+            ns_used = used_names_per_ns.setdefault(rec.namespace, set())
+            filename = cls._safe_filename(rec.topic, ns_used)
+            filepath = os.path.join(ns_dir, filename)
+            exported_filepaths.add(os.path.abspath(filepath))
+
+            if not out_edges:
+                links_yaml = "links: []"
+            else:
+                links_lines = ["links:"]
+                for e in out_edges:
+                    links_lines.append(f'  - "{e.relation} -> {e.namespace}:{e.topic}"')
+                links_yaml = "\n".join(links_lines)
+
+            ttl_yaml = str(rec.ttl_days) if rec.ttl_days is not None else "null"
+            clean_tags = rec.tags.replace("\\", "\\\\").replace('"', '\\"')
+            clean_topic = rec.topic.replace("\\", "\\\\").replace('"', '\\"')
+            clean_ns = rec.namespace.replace("\\", "\\\\").replace('"', '\\"')
+
+            frontmatter = (
+                f"---\n"
+                f'namespace: "{clean_ns}"\n'
+                f'topic: "{clean_topic}"\n'
+                f'kind: "{rec.kind}"\n'
+                f'tags: "{clean_tags}"\n'
+                f"access_count: {rec.access_count}\n"
+                f"ttl_days: {ttl_yaml}\n"
+                f'created_at: "{rec.created_at}"\n'
+                f'updated_at: "{rec.updated_at}"\n'
+                f"{links_yaml}\n"
+                f"---"
             )
 
-    core_created = False
-    if not os.path.exists(CORE_PATH) or args.force:
-        if os.path.exists(CORE_TEMPLATE_PATH):
-            with open(CORE_TEMPLATE_PATH, "r", encoding="utf-8") as f:
-                template = f.read()
-            rendered = template.replace("{{USER_NAME}}", user_name)
-            rendered = rendered.replace("{{USER_LANG}}", user_lang)
-            rendered = rendered.replace("{{DEFAULT_WORKSPACE}}", workspace)
-            with open(CORE_PATH, "w", encoding="utf-8") as f:
-                f.write(rendered)
-            core_created = True
+            semantic_section = ""
+            if out_edges or in_edges:
+                s_lines = ["\n## 🔗 Links Semânticos"]
+                for e in out_edges:
+                    s_lines.append(f"- **{e.relation}** -> [[{e.namespace}/{e.topic}]]")
+                for e in in_edges:
+                    s_lines.append(f"- *referenced by* **{e.relation}** <- [[{e.namespace}/{e.topic}]]")
+                semantic_section = "\n" + "\n".join(s_lines)
+
+            file_content = f"{frontmatter}\n\n# {rec.topic}\n\n{rec.content.strip()}{semantic_section}\n"
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(file_content)
+
+            grouped_for_index.setdefault(rec.namespace, []).append({
+                "topic": rec.topic,
+                "kind": rec.kind,
+                "tags": rec.tags,
+                "link": f"{ns_folder}/{filename}",
+                "summary": DomainPolicy.make_summary(rec.content, rec.tags),
+            })
+
+        index_path = os.path.join(wiki_dir, "INDEX.md")
+        index_lines = [
+            "# 📚 Antigravity Memory Wiki Index",
+            "",
+            f"> Generated on: {now_iso} | Total memories: {len(items)}",
+            "",
+            "## Namespaces",
+        ]
+        for ns, entries in grouped_for_index.items():
+            ns_anchor = ns.replace(":", "").replace("_", "-").lower()
+            index_lines.append(f"- [`{ns}`](#{ns_anchor}) ({len(entries)} memories)")
+
+        index_lines.append("")
+        for ns, entries in grouped_for_index.items():
+            index_lines.append(f"## `{ns}`")
+            index_lines.append("")
+            for it in entries:
+                tags_str = f" | tags: {it['tags']}" if it["tags"] else ""
+                index_lines.append(f"- [{it['topic']}]({it['link']}) (`{it['kind']}`{tags_str}) — {it['summary']}")
+            index_lines.append("")
+
+        with open(index_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(index_lines))
+
+        if is_full_export:
+            abs_index = os.path.abspath(index_path)
+            for root, _, files in os.walk(wiki_dir):
+                for file in files:
+                    if file.endswith(".md"):
+                        fp = os.path.abspath(os.path.join(root, file))
+                        if fp not in exported_filepaths and fp != abs_index:
+                            try:
+                                os.remove(fp)
+                            except OSError:
+                                pass
+            for root, dirs, _ in os.walk(wiki_dir, topdown=False):
+                for d in dirs:
+                    dp = os.path.join(root, d)
+                    try:
+                        if not os.listdir(dp):
+                            os.rmdir(dp)
+                    except OSError:
+                        pass
+
+        return len(items), index_path
+
+    @classmethod
+    def read_wiki_directory(cls, wiki_dir: str) -> tuple[Sequence[WikiDocument], Sequence[str]]:
+        if not os.path.isdir(wiki_dir):
+            raise ResourceNotFoundError(f"Import directory not found: {wiki_dir}")
+
+        docs: list[WikiDocument] = []
+        warnings: list[str] = []
+
+        for root, _, files in os.walk(wiki_dir):
+            for file in sorted(files):
+                if not file.endswith(".md") or file == "INDEX.md":
+                    continue
+                filepath = os.path.join(root, file)
+                with open(filepath, "r", encoding="utf-8") as fp:
+                    raw_text = fp.read()
+
+                if not raw_text.lstrip().startswith("---"):
+                    continue
+
+                parts = re.split(r"^---\s*$", raw_text.lstrip(), maxsplit=2, flags=re.MULTILINE)
+                if len(parts) < 3:
+                    continue
+
+                fm_text = parts[1]
+                body = parts[2]
+
+                doc = cls.parse_frontmatter(fm_text)
+                if not doc.namespace or not doc.topic:
+                    continue
+
+                try:
+                    DomainPolicy.validate_namespace(doc.namespace)
+                except DomainValidationError:
+                    warnings.append(f"[WARN] Skipping {filepath}: invalid namespace '{doc.namespace}'")
+                    continue
+
+                body_no_links = re.split(r"\n##\s+🔗\s+Links Semânticos", body)[0]
+                clean_body = re.sub(r"^\s*#\s+[^\n]*\n", "", body_no_links, count=1).strip()
+                doc.body = clean_body
+                docs.append(doc)
+
+        return docs, warnings
+
+
+# ============================================================================
+# 5. DRIVING ADAPTER (APPLICATION CONTROLLER & CLI)
+# ============================================================================
+
+class MemoryEngineController:
+    def __init__(
+        self,
+        repo: MemoryRepositoryPort,
+        clock: ClockPort,
+        mem_dir: str,
+        db_path: str,
+        core_path: str,
+        core_template_path: str,
+    ) -> None:
+        self._repo = repo
+        self._clock = clock
+        self._mem_dir = mem_dir
+        self._db_path = db_path
+        self._core_path = core_path
+        self._core_template_path = core_template_path
+        self._lock_path = os.path.join(mem_dir, ".core.lock")
+
+    def _print_prospective_alerts(self, namespaces: Sequence[str]) -> None:
+        if not namespaces:
+            return
+        tasks = self._repo.list_due_tasks(namespaces)
+        for t in tasks:
+            print(f"🔔 PROSPECTIVE DUE [{t.namespace}]: #{t.id} [{t.trigger_cond}] -> {t.action}")
+        if tasks:
+            print()
+
+    def cmd_init(self, args: argparse.Namespace) -> None:
+        ts = self._clock.now_iso()
+        user_name = args.user if args.user is not None else "[UNCONFIGURED]"
+        user_lang = args.lang if args.lang is not None else "pt-BR"
+        workspace = args.workspace if args.workspace is not None else "~/workspace"
+
+        foundational = (
+            (
+                "global",
+                "decision",
+                "agent-memory-architecture",
+                "Arquitetura de Memoria Hibrida 2-Tier com 7-Memory Evolution (Letta/MemGPT, CoALA, Mem0, Zep/Graphiti + SQLite FTS5): 1) Working Memory (Tier 1 Hot) em CORE.md (<=60 linhas, guardrail bloqueante via 'mem check-core'); 2) Declarative Memory (Tier 2 facts, decisions, invariants com Semantic Freshness/TTL e 'mem verify'); 3) Episodic Memory (learnings de bugs/edge cases com '[DEAD-ENDS]' e recall rapido via 'mem recall-error'); 4) Procedural Memory (receitas reutilizaveis com kind 'playbook'); 5) Semantic Memory Graph (relacoes direcionadas via 'mem link' e visualizacao contextual em 'mem get'); 6) Prospective Memory (pendencias/gatilhos persistentes via 'mem defer', 'mem due', 'mem done' com alertas ativos em search/get); 7) Retrieval Memory (ranking hibrido BM25 normalizado escalado por frequencia de acesso e decaimento temporal + expansao dinamica de sinonimos em 'mem syn'); 8) Wiki Markdown Interop ('mem export-md' e 'mem import-md' com YAML frontmatter e WikiLinks [[ns/topic]]). Shutdown Write-on-Delta.",
+                "memory,architecture,sqlite,fts5,7-memory-evolution,graph,prospective,ttl,wiki",
+            ),
+            (
+                "global",
+                "decision",
+                "dag-parallel-model-orchestration",
+                "O Orchestrator opera como DAG Scheduler e Auto-Model Router: 1) Decomposicao Atomica (quebra pedidos monoliticos em micro-tarefas ortogonais). 2) Paralelismo Maximo Fan-Out (dispara todas as subtarefas sem dependencia simultaneamente no mesmo turno via invoke_subagent). 3) Tiered Model Orchestration (seleciona automaticamente Model='flash_lite' para IO/inspecao, 'flash' para operacoes padrao, 'pro' para raciocinio profundo e 'inherit' para fronteira). 4) Comunicacao Maquina-Maquina telegrafica com Differential Context Passing.",
+                "orchestrator,dag,parallelism,model-routing,token-economy",
+            ),
+            (
+                "global",
+                "invariant",
+                "zero-assumptions-mandatory-delegation",
+                "Lei Zero Inviolavel (Protocolo Zero Assumptions): Nenhum agente pode assumir, deduzir ou escolher silenciosamente em cenarios de duvida, ambiguidade ou decisao de negocio, arquitetura, contratos ou escopo. Toda duvida/decisao deve ser obrigatoriamente delegada ao usuario (identificado em CORE.md / global:user-profile), apresentando opcoes estruturadas e recomendacao tecnica fundamentada.",
+                "zero-assumptions,delegation,invariant,lei-zero",
+            ),
+            (
+                "global",
+                "invariant",
+                "no-autonomous-git-commit-push",
+                "Proibicao Absoluta de Git Commit/Push Autonomo: Nenhum agente ou orquestrador tem permissao para executar git commit ou git push por iniciativa propria. Exige autorizacao previa e expressa do usuario (identificado em CORE.md).",
+                "git,commit,push,prohibition,invariant",
+            ),
+            (
+                "global",
+                "invariant",
+                "user-profile",
+                f"Identidade e perfil do usuario ativo (Single Source of Truth em memoria L1 CORE.md e L2 archival.db): Nome: {user_name}. Idioma: {user_lang}. Workspace padrão: {workspace}. O orchestrator deve saudar o usuario pelo nome registrado aqui e em CORE.md, mantendo Saudação Limpa (Zero Boot/Status Report): NUNCA informar status internos de carregamento/memória/diretivas no início do chat (a menos que explicitamente solicitado pelo usuário), limitando-se a uma saudação direta e natural. Dados de identidade do usuario NUNCA devem ficar hardcoded em arquivos procedurais (GEMINI.md, COMMON_INSTRUCTIONS.md, AGENT.md).",
+                "user,profile,identity,invariant,workspace,greeting,zero-status-report",
+            ),
+            (
+                "global",
+                "invariant",
+                "clean-greeting-no-boot-status",
+                "Invariante de Saudação Limpa (Zero Boot/Status Report): O orchestrator NUNCA deve informar status internos de carregamento, sincronização de memória (L1/L2) ou diretivas ativas no início do chat ou ao carregar o agente (ex: 'agente carregado', 'memória sincronizada', 'diretivas ativas'), a menos que explicitamente solicitado pelo usuário. Deve limitar-se a uma saudação direta e natural utilizando o nome registrado em CORE.md.",
+                "greeting,orchestrator,invariant,zero-status-report,boot,ux",
+            ),
+        )
+
+        self._repo.initialize(foundational, ts)
+        try:
+            self._repo.link_topics("global", "clean-greeting-no-boot-status", "RELATES_TO", "global", "user-profile", ts)
+        except Exception:
+            pass
+
+        core_created = False
+        with file_lock(self._lock_path):
+            if not os.path.exists(self._core_path) or args.force:
+                if os.path.exists(self._core_template_path):
+                    with open(self._core_template_path, "r", encoding="utf-8") as f:
+                        template = f.read()
+                else:
+                    template = DEFAULT_CORE_TEMPLATE
+                rendered = (
+                    template.replace("{{USER_NAME}}", user_name)
+                    .replace("{{USER_LANG}}", user_lang)
+                    .replace("{{DEFAULT_WORKSPACE}}", workspace)
+                )
+                with open(self._core_path, "w", encoding="utf-8") as f:
+                    f.write(rendered)
+                core_created = True
+
+        print(f"[OK] Initialized archival database at {self._db_path}")
+        print("[OK] Seeded foundational L2 records in 'global'")
+        if core_created:
+            print(f"[OK] Generated {self._core_path} from template (user='{user_name}', lang='{user_lang}', workspace='{workspace}')")
+        elif os.path.exists(self._core_path):
+            print(f"[INFO] Existing CORE.md preserved at {self._core_path} (use --force to overwrite)")
+
+    def cmd_upsert(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        DomainPolicy.validate_kind(args.kind)
+        ttl_days, _ = DomainPolicy.parse_ttl(args.ttl, args.kind, is_verify=False)
+        ts = self._clock.now_iso()
+        self._repo.upsert(args.namespace, args.kind, args.topic, args.content, args.tags or "", ttl_days, ts)
+        ttl_msg = f" (ttl={ttl_days}d)" if ttl_days is not None else ""
+        print(f"[OK] Upserted [{args.namespace}/{args.kind}] topic='{args.topic}'{ttl_msg} at {ts}")
+
+    def cmd_verify(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        new_ttl, update_ttl = DomainPolicy.parse_ttl(args.ttl, "fact", is_verify=True)
+        ts = self._clock.now_iso()
+        effective_ttl = self._repo.verify_freshness(args.namespace, args.topic, new_ttl, update_ttl, ts)
+        if update_ttl:
+            ttl_msg = f" (ttl={effective_ttl}d)" if effective_ttl is not None else " (ttl=infinite)"
         else:
-            print(f"[WARN] CORE.template.md not found at {CORE_TEMPLATE_PATH}")
+            ttl_msg = f" (ttl={effective_ttl}d)" if effective_ttl is not None else ""
+        print(f"[OK] Verified freshness for [{args.namespace}] topic='{args.topic}'{ttl_msg} at {ts}")
 
-    print(f"[OK] Initialized archival database at {DB_PATH}")
-    print("[OK] Seeded foundational L2 records in 'global'")
-    if core_created:
-        print(f"[OK] Generated {CORE_PATH} from template (user='{user_name}', lang='{user_lang}', workspace='{workspace}')")
-    elif os.path.exists(CORE_PATH):
-        print(f"[INFO] Existing CORE.md preserved at {CORE_PATH} (use --force to overwrite)")
+    def cmd_search(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+        syn_map = self._repo.get_synonyms()
+        fts_query, syns = DomainPolicy.build_fts_query(args.query, syn_map)
+        if not fts_query:
+            raise DomainValidationError("Empty search query")
+
+        records = self._repo.search_fts(fts_query, args.ns, args.limit, prioritize_episodic=False)
+
+        if args.ns:
+            self._print_prospective_alerts([args.ns])
+        else:
+            matched_ns = list(dict.fromkeys(r.namespace for r in records))
+            self._print_prospective_alerts(matched_ns)
+
+        if not records:
+            msg = f"No archival memories matched query='{args.query}'"
+            if syns:
+                msg += f" (expanded with: {', '.join(syns)})"
+            if args.ns:
+                msg += f" in namespace='{args.ns}'"
+            print(msg)
+            return
+
+        if syns:
+            print(f"[FTS5 Expanded with synonyms: {', '.join(syns)}]\n")
+
+        for r in records:
+            ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
+            print(f"=== [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
+            stale_warn = DomainPolicy.check_stale(r.updated_at, r.ttl_days, self._clock)
+            if stale_warn:
+                print(stale_warn)
+            print(r.content)
+            print()
+
+    def cmd_get(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        self._print_prospective_alerts([args.namespace])
+        rec, edges = self._repo.get_by_topic(args.namespace, args.topic, increment_hit=True)
+        ttl_part = f" | ttl={rec.ttl_days}d" if rec.ttl_days is not None else ""
+        print(f"=== [{rec.namespace}/{rec.kind}] {rec.topic} (tags: {rec.tags or '-'} | updated: {rec.updated_at}{ttl_part} | hits: {rec.access_count}) ===")
+        stale_warn = DomainPolicy.check_stale(rec.updated_at, rec.ttl_days, self._clock)
+        if stale_warn:
+            print(stale_warn)
+        print(rec.content)
+
+        if edges:
+            linked = [
+                f"--({e.relation})--> [{e.namespace}:{e.topic}]"
+                if e.direction == "out"
+                else f"<--({e.relation})-- [{e.namespace}:{e.topic}]"
+                for e in edges
+            ]
+            print(f"\n🔗 Linked: {', '.join(linked)}")
+
+    def cmd_list(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+        records = self._repo.list_records(args.ns)
+        if not records:
+            print("(Archival memory is empty)" if not args.ns else f"(No memories in namespace '{args.ns}')")
+            return
+        for r in records:
+            ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
+            print(f"- [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'}{ttl_part}) | updated: {r.updated_at} | hits: {r.access_count}")
+
+    def cmd_delete(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        deleted = self._repo.delete_record(args.namespace, args.topic)
+        if deleted:
+            print(f"[OK] Deleted [{args.namespace}] topic='{args.topic}'")
+        else:
+            print(f"[WARN] Topic not found: [{args.namespace}] topic='{args.topic}'")
+
+    def cmd_promote(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+        records = self._repo.get_promotion_candidates(args.ns, args.by, args.min_hits, args.limit)
+        if not records:
+            print("No memories qualify for promotion.")
+            return
+
+        print(f"=== Archival Memory Promotion Candidates (Sorted by {args.by}, limit={args.limit}) ===")
+        for idx, r in enumerate(records, 1):
+            ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
+            print(f"{idx}. [{r.namespace}/{r.kind}] '{r.topic}' (hits: {r.access_count}{ttl_part} | updated: {r.updated_at})")
+        print()
+
+        grouped: dict[str, list[tuple[str, str]]] = {}
+        for r in records:
+            grouped.setdefault(r.namespace, []).append((r.topic, DomainPolicy.make_summary(r.content, r.tags)))
+
+        print("=== Semantic Directory Snippet (Ready for CORE.md) ===")
+        for ns, items in grouped.items():
+            formatted_items = ", ".join([f"`{topic}` ({summ})" for topic, summ in items])
+            ns_label = f"`{ns}` / `orchestrator`" if ns == "global" else f"`{ns}`"
+            print(f"- **{ns_label}:** Tópicos indexados em L2: {formatted_items}")
+
+    def cmd_link(self, args: argparse.Namespace) -> None:
+        if ":" not in args.source:
+            raise DomainValidationError(f"Source '{args.source}' must be in '<namespace>:<topic>' format")
+        if ":" not in args.target:
+            raise DomainValidationError(f"Target '{args.target}' must be in '<namespace>:<topic>' format")
+        src_ns, src_topic = args.source.split(":", 1)
+        dst_ns, dst_topic = args.target.split(":", 1)
+        DomainPolicy.validate_namespace(src_ns)
+        DomainPolicy.validate_namespace(dst_ns)
+        relation = args.relation.strip().upper()
+        ts = self._clock.now_iso()
+        self._repo.link_topics(src_ns, src_topic, relation, dst_ns, dst_topic, ts)
+        print(f"[OK] Linked [{src_ns}:{src_topic}] --({relation})--> [{dst_ns}:{dst_topic}]")
+
+    def cmd_defer(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        ts = self._clock.now_iso()
+        task_id = self._repo.defer_task(args.namespace, args.trigger_cond, args.action, ts)
+        print(f"[OK] Deferred prospective task #{task_id} [{args.namespace}]: [{args.trigger_cond}] -> {args.action}")
+
+    def cmd_due(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+            tasks = self._repo.list_due_tasks([args.ns])
+        else:
+            tasks = self._repo.list_due_tasks(None)
+
+        if not tasks:
+            print("(No pending prospective tasks)" if not args.ns else f"(No pending prospective tasks in namespace '{args.ns}')")
+            return
+        print(f"=== Pending Prospective Tasks ({len(tasks)}) ===")
+        for r in tasks:
+            print(f"#{r.id} [{r.namespace}] [{r.trigger_cond}] -> {r.action} (created: {r.created_at})")
+
+    def cmd_done(self, args: argparse.Namespace) -> None:
+        ts = self._clock.now_iso()
+        if self._repo.complete_task(args.task_id, ts):
+            print(f"[OK] Completed prospective task #{args.task_id} at {ts}")
+        else:
+            print(f"[WARN] Prospective task #{args.task_id} not found or already completed")
+
+    def cmd_syn(self, args: argparse.Namespace) -> None:
+        action = getattr(args, "action", None)
+        cmd_name = getattr(args, "cmd", "")
+        if cmd_name == "syn-list" or action in (None, "list"):
+            syn_map = self._repo.get_synonyms()
+            if not syn_map:
+                print("(No synonyms configured)")
+                return
+            print(f"=== Dynamic FTS5 Synonyms ({len(syn_map)} terms) ===")
+            for term, expanded in syn_map.items():
+                print(f"- {term} -> {', '.join(expanded)}")
+        elif action == "add":
+            if not getattr(args, "term", None) or not getattr(args, "synonyms", None):
+                raise DomainValidationError("'syn add' requires <term> and \"<syn1,syn2,...>\"")
+            term = args.term.strip().lower()
+            expanded_list = [s.strip().lower() for s in args.synonyms.split(",") if s.strip()]
+            if not expanded_list:
+                raise DomainValidationError("No valid synonyms provided in expanded list")
+            expanded_str = ", ".join(expanded_list)
+            self._repo.upsert_synonym(term, expanded_str)
+            print(f"[OK] Dynamic synonym saved: '{term}' -> '{expanded_str}'")
+
+    def cmd_recall_error(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+        fts_query, words = DomainPolicy.build_error_fts_query(args.error_snippet)
+        if not fts_query:
+            raise DomainValidationError("No searchable keywords (length >= 3) found in error snippet")
+
+        records = self._repo.search_fts(fts_query, args.ns, args.limit, prioritize_episodic=True)
+        if not records:
+            print(f"No error solutions found matching query keywords: {', '.join(words[:10])}")
+            return
+
+        print(f"=== Episodic Error Recall (Matched {len(records)} record(s)) ===")
+        for r in records:
+            ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
+            print(f"\n=== [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
+            stale_warn = DomainPolicy.check_stale(r.updated_at, r.ttl_days, self._clock)
+            if stale_warn:
+                print(stale_warn)
+            print(r.content)
+
+    def cmd_check_core(self, _args: argparse.Namespace) -> None:
+        with file_lock(self._lock_path):
+            if not os.path.exists(self._core_path):
+                raise ResourceNotFoundError(f"CORE.md not found at {self._core_path}")
+            with open(self._core_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+
+        line_count = len(lines)
+        exceeded = line_count > CORE_MAX_LINES
+        status = "EXCEEDED" if exceeded else "OK"
+        remaining = CORE_MAX_LINES - line_count
+
+        print("=== CORE.md Working Memory Budget ===")
+        print(f"Status: {status} ({line_count}/{CORE_MAX_LINES} lines used, {remaining} lines remaining)")
+        print(f"Path: {self._core_path}")
+
+        due_tasks = self._repo.list_due_tasks(None)
+        print("\n=== Pending Prospective Tasks ===")
+        if not due_tasks:
+            print("(No pending prospective tasks)")
+        else:
+            for t in due_tasks:
+                print(f"- #{t.id} [{t.namespace}]: [{t.trigger_cond}] -> {t.action} (created: {t.created_at})")
+
+        if exceeded:
+            sys.exit(1)
+
+    def cmd_export_md(self, args: argparse.Namespace) -> None:
+        if args.ns:
+            DomainPolicy.validate_namespace(args.ns)
+        wiki_dir = args.dir if args.dir else os.path.join(self._mem_dir, "wiki")
+        items = self._repo.get_all_for_export(args.ns)
+        if not items:
+            print("No memories to export." if not args.ns else f"No memories to export in namespace '{args.ns}'.")
+            return
+        count, index_path = MarkdownWikiAdapter.export_wiki(
+            wiki_dir=wiki_dir,
+            items=items,
+            is_full_export=(args.ns is None),
+            now_iso=self._clock.now_iso(),
+        )
+        print(f"[OK] Exported {count} memories to {wiki_dir}")
+        print(f"[OK] Generated index at {index_path}")
+
+    def cmd_import_md(self, args: argparse.Namespace) -> None:
+        wiki_dir = args.dir if args.dir else os.path.join(self._mem_dir, "wiki")
+        docs, warnings = MarkdownWikiAdapter.read_wiki_directory(wiki_dir)
+        for w in warnings:
+            print(w)
+        if not docs:
+            print(f"No valid markdown memory files found in {wiki_dir}")
+            return
+        imported_cnt, links_cnt = self._repo.bulk_import(docs, self._clock.now_iso())
+        print(f"[OK] Imported {imported_cnt} memories from {wiki_dir}")
+        print(f"[OK] Restored {links_cnt} semantic links into memory_edges")
+
+    def cmd_stats(self, _args: argparse.Namespace) -> None:
+        stats = self._repo.compute_stats(lambda u, t: DomainPolicy.check_stale(u, t, self._clock))
+        print("=== Archival Memory Statistics (SQLite + FTS5) ===")
+        for ns in stats.namespaces:
+            print(f"- namespace='{ns.namespace}': {ns.count} records | {ns.hits} total hits | {ns.total_bytes} bytes")
+
+        print(f"\nFreshness / TTL: {stats.stale_count} stale / {stats.ttl_monitored_count} monitored with TTL")
+        print(f"Prospective Tasks: {stats.pending_tasks_count} pending / {stats.total_tasks_count} total")
+        print(f"Semantic Edges: {stats.edges_count} total connections")
+        print(f"Dynamic Synonyms: {stats.synonyms_count} mapped terms")
+
+        if stats.top_records:
+            print("\nTop Accessed Records (Promotion Candidates for CORE.md):")
+            for t in stats.top_records:
+                ttl_part = f" | ttl={t.ttl_days}d" if t.ttl_days is not None else ""
+                print(f"  * [{t.namespace}] {t.topic} ({t.access_count} hits{ttl_part})")
+        print("\nTip: Run 'mem promote' to generate ready-to-use markdown for CORE.md Semantic Directory.")
 
 
-def cmd_stats(_args: argparse.Namespace) -> None:
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT namespace, COUNT(*) as cnt, SUM(access_count) as hits, SUM(LENGTH(content)) as bytes FROM memories GROUP BY namespace ORDER BY namespace"
-    ).fetchall()
-    print("=== Archival Memory Statistics (SQLite + FTS5) ===")
-    for r in rows:
-        print(f"- namespace='{r['namespace']}': {r['cnt']} records | {r['hits'] or 0} total hits | {r['bytes'] or 0} bytes")
-
-    # Stale / TTL memories count
-    all_monitored = conn.execute("SELECT updated_at, ttl_days FROM memories WHERE ttl_days IS NOT NULL").fetchall()
-    stale_count = sum(1 for m in all_monitored if check_stale(m["updated_at"], m["ttl_days"]) is not None)
-    print(f"\nFreshness / TTL: {stale_count} stale / {len(all_monitored)} monitored with TTL")
-
-    # Prospective tasks count
-    pending_tasks = conn.execute("SELECT COUNT(*) FROM prospective_tasks WHERE status = 'pending'").fetchone()[0]
-    total_tasks = conn.execute("SELECT COUNT(*) FROM prospective_tasks").fetchone()[0]
-    print(f"Prospective Tasks: {pending_tasks} pending / {total_tasks} total")
-
-    # Semantic edges count
-    edges_count = conn.execute("SELECT COUNT(*) FROM memory_edges").fetchone()[0]
-    print(f"Semantic Edges: {edges_count} total connections")
-
-    # Dynamic synonyms count
-    syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
-    print(f"Dynamic Synonyms: {syn_count} mapped terms")
-
-    top = conn.execute(
-        "SELECT namespace, topic, access_count, ttl_days FROM memories ORDER BY access_count DESC, updated_at DESC LIMIT 5"
-    ).fetchall()
-    if top:
-        print("\nTop Accessed Records (Promotion Candidates for CORE.md):")
-        for t in top:
-            ttl_part = f" | ttl={t['ttl_days']}d" if t['ttl_days'] is not None else ""
-            print(f"  * [{t['namespace']}] {t['topic']} ({t['access_count']} hits{ttl_part})")
-    print("\nTip: Run 'mem promote' to generate ready-to-use markdown for CORE.md Semantic Directory.")
-
-
-def main() -> None:
+def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Antigravity Tier-2 Archival Memory CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="Initialize memory database, seed foundational records, and create CORE.md")
-    p_init.add_argument("--user", default="[UNCONFIGURED]", help="User display name (default: [UNCONFIGURED])")
-    p_init.add_argument("--lang", default="pt-BR", help="User preferred language (default: pt-BR)")
-    p_init.add_argument("--workspace", default="~/workspace", help="Default workspace path (default: ~/workspace)")
+    p_init.add_argument("--user", default="[UNCONFIGURED]", help="User display name")
+    p_init.add_argument("--lang", default="pt-BR", help="User preferred language")
+    p_init.add_argument("--workspace", default="~/workspace", help="Default workspace path")
     p_init.add_argument("--force", action="store_true", help="Force overwrite existing CORE.md from template")
-    p_init.set_defaults(func=cmd_init)
+    p_init.set_defaults(func=controller.cmd_init)
 
     p_search = sub.add_parser("search", help="Search archival memories via FTS5 BM25 with synonym expansion")
     p_search.add_argument("query", help="Search terms or phrases")
-    p_search.add_argument("--ns", default=None, help="Filter by namespace (e.g. default, kotlin, rust, proj:my-project)")
+    p_search.add_argument("--ns", default=None, help="Filter by namespace")
     p_search.add_argument("--limit", type=int, default=5, help="Result limit (default: 5)")
-    p_search.set_defaults(func=cmd_search)
+    p_search.set_defaults(func=controller.cmd_search)
 
     p_get = sub.add_parser("get", help="Get exact memory record by namespace and topic")
-    p_get.add_argument("namespace", help="Namespace (e.g. default, kotlin, rust, proj:my-project)")
+    p_get.add_argument("namespace", help="Namespace")
     p_get.add_argument("topic", help="Topic name")
-    p_get.set_defaults(func=cmd_get)
+    p_get.set_defaults(func=controller.cmd_get)
 
     p_upsert = sub.add_parser("upsert", help="Insert or update an archival memory record")
     p_upsert.add_argument("namespace", help="Namespace (<domain> or proj:<name>)")
@@ -1344,79 +1620,103 @@ def main() -> None:
     p_upsert.add_argument("content", help="Content payload")
     p_upsert.add_argument("tags", nargs="?", default="", help="Comma-separated tags")
     p_upsert.add_argument("--ttl", default=None, help="TTL in days (int, or '0'/'none' for infinite)")
-    p_upsert.set_defaults(func=cmd_upsert)
+    p_upsert.set_defaults(func=controller.cmd_upsert)
 
     p_verify = sub.add_parser("verify", help="Verify freshness of a memory record and update its timestamp/TTL")
     p_verify.add_argument("namespace", help="Namespace (<domain> or proj:<name>)")
     p_verify.add_argument("topic", help="Topic identifier")
     p_verify.add_argument("--ttl", default=None, help="Update TTL in days (int, or '0'/'none' for infinite)")
-    p_verify.set_defaults(func=cmd_verify)
+    p_verify.set_defaults(func=controller.cmd_verify)
 
     p_list = sub.add_parser("list", help="List memory records")
     p_list.add_argument("--ns", default=None, help="Filter by namespace")
-    p_list.set_defaults(func=cmd_list)
+    p_list.set_defaults(func=controller.cmd_list)
 
     p_del = sub.add_parser("delete", help="Delete a memory record")
     p_del.add_argument("namespace", help="Namespace")
     p_del.add_argument("topic", help="Topic name")
-    p_del.set_defaults(func=cmd_delete)
+    p_del.set_defaults(func=controller.cmd_delete)
 
     p_promote = sub.add_parser("promote", help="Promote high-traffic or recent L2 topics to CORE.md Semantic Directory")
     p_promote.add_argument("--ns", default=None, help="Filter by namespace")
     p_promote.add_argument("--limit", type=int, default=5, help="Candidate limit (default: 5)")
-    p_promote.add_argument("--by", choices=["hits", "recent"], default="hits", help="Sort order: 'hits' or 'recent' (default: hits)")
-    p_promote.add_argument("--min-hits", type=int, default=0, help="Minimum access_count filter (default: 0)")
-    p_promote.set_defaults(func=cmd_promote)
+    p_promote.add_argument("--by", choices=["hits", "recent"], default="hits", help="Sort order")
+    p_promote.add_argument("--min-hits", type=int, default=0, help="Minimum access_count filter")
+    p_promote.set_defaults(func=controller.cmd_promote)
 
-    p_stats = sub.add_parser("stats", help="Show storage and hit statistics")
-    p_stats.set_defaults(func=cmd_stats)
+    p_stats = sub.add_parser("stats", aliases=["status"], help="Show storage and hit statistics")
+    p_stats.set_defaults(func=controller.cmd_stats)
 
     p_link = sub.add_parser("link", help="Link two memories with a semantic relation")
     p_link.add_argument("source", help="Source memory in <namespace>:<topic> format")
     p_link.add_argument("relation", help="Relation name (e.g. RELATES_TO, DEPENDS_ON, SUPERSEDES)")
     p_link.add_argument("target", help="Target memory in <namespace>:<topic> format")
-    p_link.set_defaults(func=cmd_link)
+    p_link.set_defaults(func=controller.cmd_link)
 
     p_defer = sub.add_parser("defer", help="Defer a prospective task/reminder for a namespace")
-    p_defer.add_argument("namespace", help="Namespace (e.g. default, kotlin, rust, proj:<name>)")
+    p_defer.add_argument("namespace", help="Namespace")
     p_defer.add_argument("trigger_cond", help="Trigger condition or event")
     p_defer.add_argument("action", help="Action to take when triggered")
-    p_defer.set_defaults(func=cmd_defer)
+    p_defer.set_defaults(func=controller.cmd_defer)
 
     p_due = sub.add_parser("due", help="List pending prospective tasks")
     p_due.add_argument("--ns", default=None, help="Filter by namespace")
-    p_due.set_defaults(func=cmd_due)
+    p_due.set_defaults(func=controller.cmd_due)
 
     p_done = sub.add_parser("done", help="Mark a prospective task as completed")
     p_done.add_argument("task_id", type=int, help="Task ID to complete")
-    p_done.set_defaults(func=cmd_done)
+    p_done.set_defaults(func=controller.cmd_done)
 
-    p_syn = sub.add_parser("syn", help="Manage dynamic FTS5 synonyms")
-    p_syn.add_argument("action", nargs="?", default="list", choices=["list", "add"], help="Action: list or add (default: list)")
+    p_syn = sub.add_parser("syn", aliases=["syn-list"], help="Manage dynamic FTS5 synonyms")
+    p_syn.add_argument("action", nargs="?", default="list", choices=["list", "add"], help="Action: list or add")
     p_syn.add_argument("term", nargs="?", default=None, help="Term to add")
     p_syn.add_argument("synonyms", nargs="?", default=None, help="Comma-separated synonyms")
-    p_syn.set_defaults(func=cmd_syn)
+    p_syn.set_defaults(func=controller.cmd_syn)
 
     p_recall = sub.add_parser("recall-error", help="Recall episodic error solutions matching an error snippet")
     p_recall.add_argument("error_snippet", help="Error message, stacktrace or snippet")
     p_recall.add_argument("--ns", default=None, help="Filter by namespace")
     p_recall.add_argument("--limit", type=int, default=5, help="Result limit (default: 5)")
-    p_recall.set_defaults(func=cmd_recall_error)
+    p_recall.set_defaults(func=controller.cmd_recall_error)
 
     p_check = sub.add_parser("check-core", help="Check CORE.md line count budget and pending prospective tasks")
-    p_check.set_defaults(func=cmd_check_core)
+    p_check.set_defaults(func=controller.cmd_check_core)
 
     p_export_md = sub.add_parser("export-md", help="Export archival memories to Markdown Wiki with YAML frontmatter")
-    p_export_md.add_argument("dir", nargs="?", default=None, help="Target export directory (default: ~/.gemini/memory/wiki)")
+    p_export_md.add_argument("dir", nargs="?", default=None, help="Target export directory")
     p_export_md.add_argument("--ns", default=None, help="Filter by namespace")
-    p_export_md.set_defaults(func=cmd_export_md)
+    p_export_md.set_defaults(func=controller.cmd_export_md)
 
     p_import_md = sub.add_parser("import-md", help="Import memories and graph links from Markdown Wiki files")
-    p_import_md.add_argument("dir", nargs="?", default=None, help="Source import directory (default: ~/.gemini/memory/wiki)")
-    p_import_md.set_defaults(func=cmd_import_md)
+    p_import_md.add_argument("dir", nargs="?", default=None, help="Source import directory")
+    p_import_md.set_defaults(func=controller.cmd_import_md)
 
+    return parser
+
+
+def main() -> None:
+    mem_dir = os.path.dirname(os.path.abspath(__file__))
+    db_path = os.path.join(mem_dir, "archival.db")
+    core_path = os.path.join(mem_dir, "CORE.md")
+    core_template_path = os.path.join(mem_dir, "CORE.template.md")
+
+    repo = SqliteMemoryRepository(db_path=db_path)
+    clock = UtcClockAdapter()
+    controller = MemoryEngineController(
+        repo=repo,
+        clock=clock,
+        mem_dir=mem_dir,
+        db_path=db_path,
+        core_path=core_path,
+        core_template_path=core_template_path,
+    )
+
+    parser = build_parser(controller)
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except (DomainValidationError, ResourceNotFoundError) as exc:
+        sys.exit(f"Error: {exc}")
 
 
 if __name__ == "__main__":
