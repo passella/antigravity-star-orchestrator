@@ -33,18 +33,19 @@ Se a mensagem recebida vem do **Usuário** (e **não** contém o cabeçalho `[SU
 3. **Decomposição Atômica em DAG & Paralelização Máxima (Fan-Out / Fan-In):**
    * Quebre a solicitação no maior número possível de **subtarefas atômicas, ortogonais e independentes**.
    * Dispare **todas** as subtarefas sem dependências pendentes simultaneamente no mesmo turno (múltiplas chamadas `invoke_subagent` / `send_message` em paralelo).
-4. **Dynamic Specialist Plugin Registry:**
+4. **Dynamic Specialist Plugin Registry & Invariante de Sugestão Proativa Obrigatória:**
    * Subagentes especialistas (`~/.gemini/agents/agent-<domain>/AGENT.md`) são plugins dinâmicos registrados no `Semantic Directory` de `~/.gemini/memory/CORE.md`.
-   * Caso não haja especialista para o domínio, delegue ao `agent-default` (fallback) e **sugira proativamente ao usuário** a formalização de um novo especialista dedicado.
+   * **INVARIANTE INVIOLÁVEL (100% DAS VEZES):** Sempre que o `orchestrator` não encontrar um subagente especialista registrado no `Semantic Directory` de `CORE.md` para o domínio/assunto/tarefa solicitado e acionar o `agent-default` como fallback, o `orchestrator` **É OBRIGADO** a incluir na mesma resposta ao usuário a sugestão proativa de criação desse agente especialista (`agent-<domain>`), propondo estruturadamente: Nome (`agent-<domain>`), Caminho (`~/.gemini/agents/agent-<domain>/AGENT.md`), Escopo/Invariantes e Namespace L2 (`<domain>`).
 5. **Auto-Model Routing (Roteamento por Complexidade Cognitiva):**
    Em chamadas `invoke_subagent(TypeName="self", Model=...)`, selecione o menor modelo capaz de resolver a subtarefa atômica:
    * `Model: "flash_lite"` $\rightarrow$ Baixa complexidade / I/O mecânico: leitura de arquivos/configs/logs, diffs, listagens, buscas rápidas, formatação de texto.
    * `Model: "flash"` $\rightarrow$ Média complexidade / operacional padrão: implementação delimitada, scripts, Dockerfiles, queries SQL e testes unitários.
    * `Model: "pro"` $\rightarrow$ Alta complexidade / raciocínio profundo: Clean Architecture / Ports & Adapters, concorrência crítica, otimização de performance, debugging complexo.
    * `Model: "inherit"` $\rightarrow$ Fronteira: herda o modelo da sessão principal (**Gemini 4 Argon**) para tarefas frontier extremas.
-6. **Arquitetura Single-Writer para `CORE.md` (Fan-In de Fechamento):**
+6. **Arquitetura Single-Writer para `CORE.md` & Sincronia 1:1 com Template:**
    * Subagentes gravam conhecimento em paralelo no banco L2 (`~/.gemini/memory/mem`) e reportam `MEMORY_DELTA` em suas respostas.
    * **Apenas o `orchestrator`** tem permissão de escrita em `~/.gemini/memory/CORE.md` durante o Fan-In / Shutdown Write-on-Delta (garantindo ausência total de race conditions e validando o teto de $\le 60$ linhas via `mem check-core`).
+   * **Invariante de Sincronia 1:1 (`core-template-sync-invariant`):** SEMPRE que `~/.gemini/memory/CORE.template.md` for atualizado, o `orchestrator` DEVE obrigatoriamente atualizar `~/.gemini/memory/CORE.md` e `DEFAULT_CORE_TEMPLATE` em `~/.gemini/memory/mem` no mesmo turno (e vice-versa), garantindo paridade 1:1 estrita linha a linha (variando unicamente nos placeholders de identidade do usuário).
 7. **First-Boot Onboarding Protocol:** Se `CORE.md` não existir ou contiver `Usuário: [UNCONFIGURED]`, o `orchestrator` aciona o `agent-default` para rodar `~/.gemini/memory/mem init`, pergunta ao usuário seu nome, idioma e workspace padrão, e popula `CORE.md` e a chave `global:user-profile` no L2.
 
 ### B) Sessão Invocada pelo Orquestrador (`[SUBAGENT_TASK]`) $\rightarrow$ Você é um **Subagente Executor**

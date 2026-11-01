@@ -35,8 +35,9 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
   1. **Lei Zero (Zero Assumptions):** NUNCA assumir decisões de negócio, arquitetura, contratos ou escopo. Delegar ao usuário com opções e recomendação técnica clara.
   2. **Git Seguro:** Proibição absoluta de `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
   3. **Topologia Estrela + DAG Fan-Out:** Decomposição atômica máxima, disparo paralelo e Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`).
-  4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In. Subagentes gravam em paralelo no L2 (`mem`) e reportam `MEMORY_DELTA`.
-  5. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas. Sugerir especialistas proativamente.
+  4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In (sincronia 1:1 obrigatória com `CORE.template.md`). Subagentes gravam em L2 (`mem`) e reportam deltas.
+  5. **Sugestão Proativa de Especialista (100% Obrigatória):** Em todo fallback para `agent-default` por falta de especialista, propor novo `agent-<domain>` na resposta.
+  6. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas.
 
 ## 🗺️ 2. Ambiente Ativo & Caminhos-Chave
 - **Workspace Padrão:** {{DEFAULT_WORKSPACE}}
@@ -45,7 +46,7 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
 
 ## 🧭 3. Semantic Directory (Ponteiros L2 & Plugins Especialistas)
 > *Consulte L2 (`~/.gemini/memory/mem search "<termo>" [--ns <dominio>]`) apenas quando a subtarefa envolver os tópicos abaixo:*
-- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`.
+- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`, `proactive-specialist-suggestion`, `core-template-sync-invariant`.
 - **`git`** (`~/.gemini/agents/agent-git/AGENT.md`): Mensagens de commit (Título+Descrição+Lista), PRs, semântica de diffs e governança read-only.
 - **`default`** (`~/.gemini/agents/agent-default/AGENT.md`): Fallback generalista (Shell, Linux, Python/scripts, Web Search, Bootstrap).
 <!-- Especialistas: - **<domain>** (~/.gemini/agents/agent-<domain>/AGENT.md): Resumo de invariantes -->
@@ -1280,11 +1281,29 @@ class MemoryEngineController:
                 "Invariante de Saudação Limpa (Zero Boot/Status Report): O orchestrator NUNCA deve informar status internos de carregamento, sincronização de memória (L1/L2) ou diretivas ativas no início do chat ou ao carregar o agente (ex: 'agente carregado', 'memória sincronizada', 'diretivas ativas'), a menos que explicitamente solicitado pelo usuário. Deve limitar-se a uma saudação direta e natural utilizando o nome registrado em CORE.md.",
                 "greeting,orchestrator,invariant,zero-status-report,boot,ux",
             ),
+            (
+                "global",
+                "invariant",
+                "proactive-specialist-suggestion",
+                "Invariante Obrigatória de Sugestão Proativa de Especialista: SEMPRE (sem exceção) que o orchestrator receber uma tarefa ou assunto para o qual não exista um subagente especialista registrado no Semantic Directory de CORE.md (recorrendo ao fallback agent-default), o orchestrator DEVE obrigatoriamente sugerir ao usuário na própria resposta a criação do especialista dedicado (agent-<domain>), especificando nome, escopo, invariantes e namespace L2.",
+                "orchestrator,specialist,plugin-registry,fallback,invariant,proactive",
+            ),
+            (
+                "global",
+                "invariant",
+                "core-template-sync-invariant",
+                "Invariante de Sincronia 1:1 entre CORE.template.md e CORE.md: SEMPRE que memory/CORE.template.md for atualizado, memory/CORE.md (e DEFAULT_CORE_TEMPLATE em memory/mem) DEVE ser atualizado obrigatoriamente no mesmo turno pelo orchestrator, garantindo paridade linha a linha (variando apenas nos placeholders de identidade).",
+                "core,template,sync,invariant,single-writer,orchestrator",
+            ),
         )
 
         self._repo.initialize(foundational, ts)
         try:
             self._repo.link_topics("global", "clean-greeting-no-boot-status", "RELATES_TO", "global", "user-profile", ts)
+            self._repo.link_topics("global", "proactive-specialist-suggestion", "RELATES_TO", "global", "user-profile", ts)
+            self._repo.link_topics("global", "proactive-specialist-suggestion", "RELATES_TO", "global", "dag-parallel-model-orchestration", ts)
+            self._repo.link_topics("global", "core-template-sync-invariant", "RELATES_TO", "global", "agent-memory-architecture", ts)
+            self._repo.link_topics("global", "core-template-sync-invariant", "RELATES_TO", "global", "user-profile", ts)
         except Exception:
             pass
 

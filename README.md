@@ -1,7 +1,7 @@
 # 🚀 antigravity-star-orchestrator: Star-Topology Multi-Agent Orchestrator & 7-Memory Starter Kit
 
 > **Um ecossistema multi-agente enxuto, determinístico e de ultra-eficiência de tokens para o Google Antigravity.**  
-> Desenvolvido com **Topologia Estrela**, **Decomposição em Grafo Acíclico Dirigido (DAG Fan-Out/Fan-In Paralelo)**, **Roteamento Automático de Modelos Cognitivos**, **Protocolo Zero Assumptions (Lei Zero Inviolável)** e uma **Arquitetura Cognitiva Híbrida de 7 Memórias** (L1 Hot Working Memory + L2 SQLite FTS5 com Zero Dependências, Semantic Freshness/TTL, Wiki Markdown e Rastreamento de Dead-Ends).
+> Desenvolvido com **Topologia Estrela**, **Decomposição em Grafo Acíclico Dirigido (DAG Fan-Out/Fan-In Paralelo)**, **Roteamento Automático de Modelos Cognitivos**, **Protocolo Zero Assumptions (Lei Zero Inviolável)** e uma **Arquitetura Cognitiva Híbrida de 7 Memórias** (L1 Hot Working Memory Single-Writer + L2 SQLite WAL FTS5 com Zero Dependências, Arquitetura Hexagonal, Semantic Freshness/TTL, Wiki Markdown e Rastreamento de Dead-Ends).
 
 ---
 
@@ -14,7 +14,7 @@
 - [Instalação Rápida & First-Boot Onboarding](#-instalação-rápida--first-boot-onboarding)
 - [Como Criar Subagentes Especialistas (Plugins Dinâmicos)](#-como-criar-subagentes-especialistas-plugins-dinâmicos)
 - [Referência Completa da CLI `~/.gemini/memory/mem`](#-referência-completa-da-cli-geminimemorymem)
-- [Diretrizes de Segurança & Privacidade](#-diretrizes-de-segurança--privacidade)
+- [Diretrizes de Segurança & Governança](#-diretrizes-de-segurança--governança)
 
 ---
 
@@ -24,56 +24,71 @@ Assistentes de IA convencionais sofrem frequentemente de três problemas crític
 
 O **Antigravity Starter Kit** foi projetado para resolver esses problemas de ponta a ponta através de princípios sólidos de engenharia de software e inteligência artificial distribuída:
 
-1. **Topologia Estrela & Separação de Papéis:** O usuário interage exclusivamente com um agente orquestrador central (`orchestrator`), focado em planejamento, decomposição de tarefas e síntese final. Tarefas operacionais são delegadas para subagentes executores.
-2. **Decomposição Atômica em DAG & Paralelismo Máximo (Fan-Out / Fan-In):** Requisições complexas não são enviadas como monólitos. O orquestrador decompõe o pedido em subtarefas atômicas independentes e dispara múltiplos subagentes simultaneamente no mesmo turno, reduzindo o tempo total de resposta de forma drástica.
-3. **Auto-Model Routing (Roteamento Cognitivo por Complexidade):** Economia extrema de tokens e baixa latência através da seleção dinâmica do modelo ideal para cada subtarefa atômica, integrando suporte a Google's latest frontier model **Gemini 4 Argon**:
-   - `flash_lite` $\rightarrow$ Tarefas mecânicas de I/O, listagens, extrações e leituras de arquivos.
-   - `flash` $\rightarrow$ Operações padrão de desenvolvimento, scripts, queries SQL e implementações delimitadas.
-   - `pro` $\rightarrow$ Design de arquitetura avançado, concorrência crítica, otimização de performance e debugging profundo.
-   - `inherit` $\rightarrow$ Herda o contexto da sessão principal, permitindo que subtarefas de extrema complexidade e raciocínio de fronteira sejam roteadas diretamente para o **Gemini 4 Argon**.
-4. **Protocolo Zero Assumptions (Lei Zero Inviolável):** Sob nenhuma hipótese os agentes assumem, adivinham ou escolhem silenciosamente decisões de negócio, arquitetura ou bifurcações técnicas ambíguas. Diante de qualquer incerteza, o fluxo é pausado e submetido ao usuário acompanhado de recomendações técnicas estruturadas.
-5. **Arquitetura Híbrida de 7 Memórias (Zero Dependências Externas):** Implementação completa em Python puro e SQLite com extensão nativa FTS5, sem necessidade de servidores externos de vetores ou dependências pesadas de terceiros.
+1. **Topologia Estrela & Separação Estrita de Papéis:** O usuário interage exclusivamente com um agente orquestrador central (`orchestrator`), focado em planejamento arquitetural, decomposição de tarefas e síntese final. Tarefas técnicas e operacionais são delegadas para subagentes executores especialistas.
+2. **Decomposição Atômica em DAG & Paralelismo Máximo (Fan-Out / Fan-In):** Requisições complexas não são tratadas como blocos monolíticos. O orquestrador decompõe o pedido em subtarefas atômicas ortogonais e dispara múltiplos subagentes simultaneamente no mesmo turno, reduzindo o tempo total de resposta de forma drástica.
+3. **Regra Arquitetural Single-Writer para L1 (`CORE.md`):** Para evitar condições de corrida (*race conditions*) durante execuções paralelas em Fan-Out, os subagentes gravam conhecimento concorrentemente apenas no banco L2 (`archival.db`) e reportam deltas no retorno (`MEMORY_DELTA`). Apenas o `orchestrator` possui permissão de escrita no `CORE.md` durante o Fan-In de fechamento.
+4. **Discovery Read-Only Leve no Turno 1:** Elimina o problema da "cegueira de descoberta" ao planejar o grafo DAG. Caso o contexto inicial não informe a estrutura do projeto, o `orchestrator` tem permissão estrita para leitura leve (listar raiz ou ler manifestos `< 100` linhas), mantendo proibição absoluta para qualquer mutação, script ou comando operacional direto.
+5. **Auto-Model Routing (Roteamento Cognitivo por Complexidade):** Economia extrema de tokens e baixa latência através da seleção dinâmica do modelo ideal para cada nó atômico do DAG, integrando suporte nativo ao modelo frontier **Gemini 4 Argon**:
+   - `flash_lite` $\rightarrow$ Tarefas mecânicas de I/O, listagens, extrações e leituras de arquivos/configs/logs.
+   - `flash` $\rightarrow$ Operações padrão de desenvolvimento, scripts, queries SQL, Dockerfiles e testes unitários.
+   - `pro` $\rightarrow$ Design de arquitetura avançado (Clean Architecture / Ports & Adapters), concorrência crítica, otimização de performance e debugging profundo.
+   - `inherit` $\rightarrow$ Herda o contexto da sessão principal, permitindo que subtarefas de extrema complexidade sejam roteadas diretamente para o **Gemini 4 Argon**.
+6. **Protocolo Zero Assumptions (Lei Zero Inviolável):** Sob nenhuma hipótese os agentes assumem, adivinham ou escolhem silenciosamente decisões de negócio, arquitetura, contratos de API, schemas ou dependências. Diante de incertezas, o fluxo é pausado imediatamente e submetido ao usuário com opções mapeadas e recomendações técnicas estruturadas.
+7. **Arquitetura Hexagonal & Concorrência Segura (Zero Dependências Externas):** O motor de memória `~/.gemini/memory/mem` foi construído seguindo **Clean Architecture (Ports & Adapters)** e **SOLID**:
+   - Camada de Domínio e Políticas desacoplada de I/O.
+   - Concorrência de alta resiliência com SQLite WAL (`PRAGMA journal_mode=WAL;`), `isolation_level=None` com transações reentrantes `BEGIN IMMEDIATE`, `PRAGMA busy_timeout=30000;` e file locking POSIX (`.core.lock`).
+   - Zero-overhead de boot através de controle de migração via `PRAGMA user_version = 2` (DDL executado estritamente na inicialização).
 
 ---
 
 ## 🏗️ Arquitetura do Sistema
 
-O fluxo de trabalho opera em topologia estrela estrita, com comunicação Máquina $\leftrightarrow$ Máquina (M2M) telegráfica e isolamento de domínios:
+O fluxo de trabalho opera em topologia estrela estrita, com comunicação Máquina $\leftrightarrow$ Máquina (M2M) telegráfica, isolamento de domínios e persistência híbrida de duas camadas:
 
 ```mermaid
 flowchart TD
     User(["👤 Desenvolvedor (Usuário)"]) <-->|"Instrução / Decisão Técnica"| Orch["👑 Orchestrator (Agente Central)"]
     
+    subgraph Discovery ["🔍 Turno 1: Discovery Leve"]
+        DiscoveryCheck["Discovery Read-Only Leve (< 100 linhas)<br/>(Inspeção de estrutura/manifesto para planejar DAG)"]
+    end
+    Orch -.-> DiscoveryCheck
+    
     subgraph L1_Memory ["🧠 L1: Working Memory (In-Context Hot Cache)"]
         CoreMD["CORE.md (<= 60 linhas)<br/>• Perfil & Invariantes<br/>• Semantic Directory (Ponteiros L2)"]
     end
     
-    Orch <-->|"Leitura / Write-on-Delta"| CoreMD
+    Orch <-->|"Leitura & Escrita Exclusiva (Single-Writer no Fan-In)"| CoreMD
     
     subgraph Parallel_Subagents ["⚡ Subagentes Executores Paralelos (DAG Fan-Out)"]
-        DefaultAgent["🛠️ agent-default<br/>(Shell, Git, Python, Scratchpads)"]
+        DefaultAgent["🛠️ agent-default<br/>(Fallback/Shell/Linux/Python/Bootstrap)"]
+        GitAgent["🌿 agent-git<br/>(Commits/PRs/Diffs/Governança)"]
         DomainAgentA["🔌 agent-postgres<br/>(Plugin Especialista)"]
         DomainAgentB["🔌 agent-rust<br/>(Plugin Especialista)"]
     end
     
-    Orch -->|"invoke_subagent (flash_lite / flash / pro)"| DefaultAgent
-    Orch -->|"invoke_subagent (flash_lite / flash / pro)"| DomainAgentA
-    Orch -->|"invoke_subagent (flash_lite / flash / pro)"| DomainAgentB
+    Orch -->|"invoke_subagent (flash_lite / flash / pro / inherit)"| DefaultAgent
+    Orch -->|"invoke_subagent (flash_lite / flash / pro / inherit)"| GitAgent
+    Orch -->|"invoke_subagent (flash_lite / flash / pro / inherit)"| DomainAgentA
+    Orch -->|"invoke_subagent (flash_lite / flash / pro / inherit)"| DomainAgentB
     
-    DefaultAgent -->|"STATUS: OK / NEED (Fan-In)"| Orch
-    DomainAgentA -->|"STATUS: OK / NEED (Fan-In)"| Orch
-    DomainAgentB -->|"STATUS: OK / NEED (Fan-In)"| Orch
+    DefaultAgent -->|"STATUS: COMPLETED (MEMORY_DELTA) / NEED (Fan-In)"| Orch
+    GitAgent -->|"STATUS: COMPLETED (MEMORY_DELTA) / NEED (Fan-In)"| Orch
+    DomainAgentA -->|"STATUS: COMPLETED (MEMORY_DELTA) / NEED (Fan-In)"| Orch
+    DomainAgentB -->|"STATUS: COMPLETED (MEMORY_DELTA) / NEED (Fan-In)"| Orch
     
     subgraph L2_Memory ["💾 L2: Archival & Cognitive Engine (~/.gemini/memory/mem)"]
-        DB[(archival.db - SQLite + FTS5)]
-        FTS5Engine["🔍 FTS5 BM25 + Recency + Frequency"]
+        DB[(archival.db - SQLite WAL + busy_timeout=30s)]
+        FTS5Engine["🔍 FTS5 BM25 Normalizado (-1.0*bm25) + Recency + Frequency"]
         GraphEngine["🕸️ Semantic Graph (memory_edges)"]
         ProspEngine["⏰ Prospective Tasks (defer/due/done)"]
-        SynEngine["📖 Synonyms Expansion (syn)"]
-        EpisodicEngine["🩹 Episodic Error Recall (recall-error)"]
+        SynEngine["📖 Synonyms Expansion (syn / syn-list)"]
+        EpisodicEngine["🩹 Episodic Recall (recall-error + CamelCase + Stopwords)"]
+        HexArch["🏛️ Arquitetura Hexagonal (Ports & Adapters)"]
     end
     
     DefaultAgent <-->|"CLI mem (search / upsert / recall)"| DB
+    GitAgent <-->|"CLI mem (search / upsert / recall)"| DB
     DomainAgentA <-->|"CLI mem (search / upsert / recall)"| DB
     DomainAgentB <-->|"CLI mem (search / upsert / recall)"| DB
     
@@ -82,55 +97,59 @@ flowchart TD
     DB --- ProspEngine
     DB --- SynEngine
     DB --- EpisodicEngine
+    DB --- HexArch
 ```
 
 ---
 
 ## 🧠 Os 7 Tipos de Memória Implementados
 
-Inspirado nas arquiteturas de memória cognitiva mais avançadas (como CoALA, Letta/MemGPT, Mem0 e Zep), o ecossistema implementa 7 camadas de memória complementares:
+Inspirado nas arquiteturas de memória cognitiva mais avançadas (como CoALA, Letta/MemGPT, Mem0 e Zep/Graphiti), o ecossistema implementa 7 camadas de memória complementares:
 
 | # | Tipo de Memória | Implementação Técnica | Finalidade & Benefício |
 |---|---|---|---|
-| **1** | **Working Memory (L1)** | `~/.gemini/memory/CORE.md` | Cache quente no prompt dos agentes (estritamente $\le$ 60 linhas verificado via `mem check-core`). Mantém identidade, invariantes e índice semântico. Acompanhado de Scratchpad Anti-Amnésia em arquivo físico para tarefas massivas. |
-| **2** | **Semantic Memory (L2)** | Tabela `memories` + Tabela `memory_edges` + Semantic Freshness | Grafo de conhecimento persistente organizado por namespaces (`<dominio>` ou `proj:<nome>`). Permite vincular nós via `mem link` e gerenciar frescor temporal de dados voláteis via `--ttl <dias>` e `mem verify`. Exportável e importável em Wiki Markdown via `mem export-md` e `mem import-md`. |
-| **3** | **Episodic Memory** | Tabela `memories` (`kind = learning`) + `recall-error` | Padrão Reflexion com rastreamento explícito de `[DEAD-ENDS / TENTATIVAS DESCARTADAS]`. Guarda históricos de erros, hipóteses refutadas e diagnósticos comprovados. Permite consulta cirúrgica imediata via `mem recall-error` para impedir repetição de falhas passadas. |
-| **4** | **Procedural Memory** | `AGENT.md` modulares + `kind = playbook` | Protocolos procedurais de conduta estáticos nos arquivos dos agentes somados a receitas executáveis passo a passo salvas dinamicamente no L2 (`kind = playbook`). |
-| **5** | **Retrieval Memory** | Virtual Table `memories_fts` (FTS5 BM25 Ponderado) | Busca híbrida com tokenizador `unicode61 remove_diacritics 2`, cálculo ponderado de relevância (tópico peso 5.0, tags 3.0, conteúdo 1.0), boost de popularidade (`access_count`), decaimento temporal e expansão por sinônimos técnicos (`mem syn`). |
-| **6** | **Parametric Memory** | Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit` running on **Gemini 4 Argon**) | Uso otimizado da inteligência interna dos modelos LLM, evitando instruções redundantes e roteando subtarefas de acordo com o esforço cognitivo necessário. Quando a sessão principal roda em **Gemini 4 Argon**, passar `Model: "inherit"` direciona subtarefas de fronteira e extrema complexidade diretamente para o **Gemini 4 Argon**! Prompts M2M telegráficos e sem preâmbulos. |
-| **7** | **Prospective Memory** | Tabela `prospective_tasks` (`defer`, `due`, `done`) | Fila persistente de intenções futuras, pendências e gatilhos contextuais (com documentação de tentativas prévias e dead-ends). Dispara alertas reativos automáticos sempre que um agente consulta um namespace com tarefas pendentes. |
+| **1** | **Working Memory (L1)** | `~/.gemini/memory/CORE.md` | Cache quente no prompt dos agentes (estritamente $\le$ 60 linhas auditado via `mem check-core` com **exit code 1 bloqueante** em caso de estouro e listagem de pendências ativas). Regra arquitetural **Single-Writer**: apenas o `orchestrator` edita no Fan-In. Acompanhado de Scratchpad Anti-Amnésia em arquivo físico para tarefas massivas. |
+| **2** | **Semantic Memory (L2)** | Tabela `memories` + Tabela `memory_edges` + Semantic Freshness | Grafo de conhecimento persistente organizado por namespaces (`<dominio>` ou `proj:<nome>`). Permite vincular nós via `mem link` e gerenciar frescor temporal de dados voláteis via `--ttl <dias>` e `mem verify`. Exportável via `mem export-md` com prevenção de colisão de arquivos por hash SHA-256 (`_safe_filename`) e importável via `mem import-md` com parsing de frontmatter YAML. |
+| **3** | **Episodic Memory** | Tabela `memories` (`kind = learning`) + `recall-error` | Padrão Reflexion com rastreamento explícito de `[DEAD-ENDS / TENTATIVAS DESCARTADAS]`. Guarda históricos de erros, hipóteses refutadas e diagnósticos comprovados. A busca `mem recall-error` utiliza **split avançado de identificadores** (`CamelCase`, `snake_case`, `kebab-case`), filtragem determinística por `ERROR_STOPWORDS` e seleção dos 24 tokens mais específicos, impedindo explosão combinatória e falsos positivos. |
+| **4** | **Procedural Memory** | `AGENT.md` modulares enxutos (DRY) + `kind = playbook` | Protocolos procedurais de conduta estáticos nos arquivos dos agentes (sem repetições desnecessárias da Constituição) somados a receitas executáveis passo a passo salvas dinamicamente no L2 (`kind = playbook`). |
+| **5** | **Retrieval Memory** | Virtual Table `memories_fts` (FTS5 BM25 Normalizado) | Busca híbrida com tokenizador `unicode61 remove_diacritics 2` e pontuação **matematicamente normalizada** (`MAX(0.0001, -1.0 * bm25(memories_fts, 5.0, 1.0, 3.0, 0.5))`), corrigindo a inversão de sinal nativa do SQLite. Aplica pesos calibrados (tópico 5.0, tags 3.0, conteúdo 1.0, namespace 0.5), boost de popularidade (`access_count`), decaimento temporal e expansão de sinônimos (`mem syn` / `syn-list`). |
+| **6** | **Parametric Memory** | Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit` no **Gemini 4 Argon**) | Uso otimizado da inteligência interna dos modelos LLM, evitando instruções redundantes e roteando subtarefas de acordo com o esforço cognitivo necessário. Quando a sessão principal roda em **Gemini 4 Argon**, passar `Model: "inherit"` direciona subtarefas de fronteira e extrema complexidade diretamente para o **Gemini 4 Argon**. Prompts M2M telegráficos. |
+| **7** | **Prospective Memory** | Tabela `prospective_tasks` (`defer`, `due`, `done`) | Fila persistente de intenções futuras, pendências e gatilhos contextuais (com documentação de tentativas prévias e dead-ends). Dispara alertas reativos automáticos sempre que um agente consulta um namespace com tarefas pendentes em `mem search` ou `mem get`. |
 
 ---
 
 ## 📁 Estrutura de Arquivos do Starter Kit
 
-O ecossistema é projetado com isolamento estrito entre o código base portátil do kit (versionado) e os dados locais da máquina do usuário (ignorados pelo Git para segurança e privacidade total):
+O ecossistema é projetado com isolamento estrito entre o código base portátil do kit (versionado) e os dados locais da máquina do usuário (ignorados pelo Git para segurança e privacidade total), além de uma consolidação DRY rigorosa (Lei Zero centralizada no `GEMINI.md`):
 
 ```text
 ~/.gemini/
 ├── .gitignore                      # Regras restritas: versiona apenas o Starter Kit
-├── GEMINI.md                       # Constituição Global (injetada em todos os agentes)
+├── GEMINI.md                       # Constituição Global (SSOT da Lei Zero, Topologia e M2M)
 ├── README.md                       # Documentação completa e guia do Starter Kit
 │
-├── agents/                         # Definições de papéis dos agentes
-│   ├── COMMON_INSTRUCTIONS.md      # Instruções operacionais comuns compartilhadas
+├── agents/                         # Definições de papéis dos agentes (Enxutas & DRY)
+│   ├── COMMON_INSTRUCTIONS.md      # Instruções operacionais comuns (Protocolo de Memória & M2M)
 │   ├── orchestrator/
-│   │   └── AGENT.md                # Agente Orquestrador Central (Star Topology)
+│   │   └── AGENT.md                # Agente Orquestrador Central (Scheduler DAG & Single-Writer)
 │   ├── agent-default/
-│   │   └── AGENT.md                # Subagente Executor Generalista (Fallback/Shell/Git)
-│   └── agent-<domain>/             # 🔒 [LOCAL] Seus plugins especialistas (ex: agent-rust)
+│   │   └── AGENT.md                # Subagente Executor Generalista (Fallback/Shell/Linux/Python)
+│   ├── agent-git/
+│   │   └── AGENT.md                # Subagente Especialista em Git (Commits 3-blocos, PRs e Governança)
+│   └── agent-<domain>/             # 🔒 [LOCAL] Seus plugins especialistas sob demanda (ex: agent-rust)
 │       └── AGENT.md
 │
-└── memory/                         # Motor Cognitivo de 7 Memórias
+└── memory/                         # Motor Cognitivo de 7 Memórias (Hexagonal & Concurrency-Safe)
     ├── mem                         # CLI executável em Python puro (Zero Dependências)
-    ├── CORE.template.md            # Template de inicialização do L1 Working Memory
+    ├── CORE.template.md            # Template de inicialização do L1 Working Memory (< 40 linhas)
     ├── CORE.md                     # 🔒 [LOCAL] L1 Working Memory gerado no Onboarding
-    └── archival.db                 # 🔒 [LOCAL] L2 SQLite Database (FTS5 + Grafo)
+    └── archival.db                 # 🔒 [LOCAL] L2 SQLite Database (WAL, FTS5 + Grafo)
 ```
 
 > [!NOTE]
-> **Arquivos Versionados no Git:** `GEMINI.md`, `README.md`, `.gitignore`, `agents/COMMON_INSTRUCTIONS.md`, `agents/orchestrator/AGENT.md`, `agents/agent-default/AGENT.md`, `memory/mem`, `memory/CORE.template.md`.  
+> **Arquivos Versionados no Git:** `GEMINI.md`, `README.md`, `.gitignore`, `agents/COMMON_INSTRUCTIONS.md`, `agents/orchestrator/AGENT.md`, `agents/agent-default/AGENT.md`, `agents/agent-git/AGENT.md`, `memory/mem`, `memory/CORE.template.md`.  
 > **Arquivos Locais (Nunca vão para o Git):** `memory/CORE.md`, `memory/archival.db` e subagentes especialistas criados localmente `agents/agent-<domain>/`.
+> **Consolidação DRY:** A "Lei Zero (Zero Assumptions)" e o protocolo M2M residem exclusivamente em `GEMINI.md`, eliminando redundâncias e inflação de tokens L1 nos demais arquivos secundários.
 
 ---
 
@@ -184,13 +203,13 @@ Se preferir inicializar manualmente via linha de comando antes de abrir o chat:
 ~/.gemini/memory/mem init --user "SeuNome" --lang "pt-BR" --workspace "~/dev"
 ```
 
-O comando cria o banco `~/.gemini/memory/archival.db` com todas as tabelas FTS5, semeia o dicionário técnico de sinônimos e gera o `~/.gemini/memory/CORE.md` personalizado a partir do template.
+O comando cria o banco `~/.gemini/memory/archival.db` com o schema v2 em modo WAL, semeia os sinônimos técnicos e gera o `~/.gemini/memory/CORE.md` a partir do `CORE.template.md` (ou do `DEFAULT_CORE_TEMPLATE` embutido no script caso o template seja omitido).
 
 ---
 
 ## 🧩 Como Criar Subagentes Especialistas (Plugins Dinâmicos)
 
-O Starter Kit é intencionalmente enxuto e vem de fábrica apenas com o `orchestrator` e o subagente generalista `agent-default`. Você pode expandir o ecossistema com especialistas sob demanda (ex: `agent-postgres`, `agent-react`, `agent-k8s`, `agent-rust`).
+O Starter Kit vem de fábrica com o `orchestrator`, o subagente generalista `agent-default` e o especialista em governança e versionamento `agent-git`. Você pode expandir o ecossistema com especialistas sob demanda (ex: `agent-postgres`, `agent-react`, `agent-k8s`, `agent-rust`).
 
 ### 1. Modo Automático Proativo (Recomendado)
 Durante o uso diário, quando você solicitar tarefas envolvendo um domínio técnico relevante que ainda não possui um especialista dedicado, o `orchestrator` acionará o `agent-default` como fallback e **sugerirá proativamente criar um agente especialista**:
@@ -204,37 +223,41 @@ Ao confirmar, o próprio `orchestrator` cria a pasta `~/.gemini/agents/agent-pos
 Se você desejar criar um especialista manualmente, siga duas etapas simples:
 
 #### Etapa 1: Criar o arquivo `~/.gemini/agents/agent-<dominio>/AGENT.md`
-Crie o arquivo herdando obrigatoriamente a **Lei Zero Inviolável** no topo:
+Crie o arquivo seguindo o padrão enxuto e DRY do ecossistema:
 
 ```markdown
 # 🛠️ AGENT: <dominio> Specialist
 
 > **Namespace L2 Primário:** `<dominio>`  
 > **Papel:** Especialista técnico em <Tecnologia/Domínio>.
+> **Constituição:** Herda integralmente a Lei Zero e normas de [`~/.gemini/GEMINI.md`](~/.gemini/GEMINI.md) e [`~/.gemini/agents/COMMON_INSTRUCTIONS.md`](~/.gemini/agents/COMMON_INSTRUCTIONS.md).
 
 ---
 
-## 🛑 0. Protocolo Zero Assumptions (Lei Zero Inviolável)
-1. **NUNCA SUPOR NADA:** Jamais deduza ou tome decisões arbitrárias diante de incertezas ou bifurcações técnicas.
-2. **ESCALAÇÃO IMEDIATA:** Diante de qualquer dúvida de requisitos ou escolha de trade-off, emita `STATUS: NEED` com `target_domain: "orchestrator"`, expondo as opções identificadas e sua recomendação técnica para validação com o usuário.
+## 🛠️ Diretrizes Operacionais de Execução
 
----
-
-## 🎯 1. Escopo & Especialidade
-- Invariantes técnicas e diretrizes de engenharia do domínio <dominio>.
-- Padrões de código, bibliotecas recomendadas e regras de segurança.
-
-## 💾 2. Protocolo de Memória L2
-- Antes de iniciar, consulte o histórico relevante via `~/.gemini/memory/mem search "<termo>" --ns <dominio>`.
-- Persista aprendizados e playbooks novos via `~/.gemini/memory/mem upsert <dominio> <kind> "<topic>" "<content>"`.
+1. **Herança da Lei Zero (Zero Assumptions):**
+   * NUNCA SUPOR NADA. Em qualquer incerteza de requisitos, arquitetura ou bifurcações técnicas, pare imediatamente.
+   * Emita `STATUS: NEED` com `target_domain: "orchestrator"` expondo opções estruturadas e recomendação técnica fundamentada para deliberação do usuário.
+2. **Proibição Absoluta de Commit/Push Autônomo:**
+   * Jamais execute `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
+3. **Engenharia de Software Rigorosa (SOLID & Clean Architecture):**
+   * Código desenvolvido ou refatorado deve seguir tipagem estrita, Ports & Adapters e tratamento explícito de erros.
+4. **Regra Single-Writer de `CORE.md` & Curadoria L2:**
+   * O subagente **NUNCA** edita `CORE.md` diretamente.
+   * Conhecimentos adquiridos devem ser gravados em L2 via `~/.gemini/memory/mem upsert/link/defer` e reportados no campo `MEMORY_DELTA` do payload `STATUS: COMPLETED`.
+5. **Anti-Amnésia & M2M Telegráfico:**
+   * Proibido resumir saídas extensas no chat (faça dump físico e informe em `PATHS`). Comunicação com o `orchestrator` 100% telegráfica e sem saudações.
 ```
 
 #### Etapa 2: Registrar no `Semantic Directory` do `CORE.md`
-Abra `~/.gemini/memory/CORE.md` e adicione uma linha na seção **3. Índice de Ponteiros L2**:
+Abra `~/.gemini/memory/CORE.md` e adicione uma linha na seção **3. Semantic Directory**:
 
 ```markdown
-- **<dominio>** (`~/.gemini/agents/agent-<dominio>/AGENT.md`): Invariantes e boas práticas de <Tecnologia>.
+- **`<dominio>`** (`~/.gemini/agents/agent-<dominio>/AGENT.md`): Invariantes e boas práticas de <Tecnologia>.
 ```
+
+*(Exemplo existente de especialista registrado: `- **git** (~/.gemini/agents/agent-git/AGENT.md): Mensagens de commit (Título+Descrição+Lista), PRs, semântica de diffs e governança read-only`)*.
 
 > [!TIP]
 > O motor `~/.gemini/memory/mem` valida e aceita qualquer novo namespace automaticamente (padrão regex `^[a-z0-9][a-z0-9_-]*$`) ou namespaces de projetos locais (`^proj:[a-zA-Z0-9._-]+$`). **Nenhuma alteração de código ou schema no motor é necessária!**
@@ -243,37 +266,44 @@ Abra `~/.gemini/memory/CORE.md` e adicione uma linha na seção **3. Índice de 
 
 ## 📖 Referência Completa da CLI `~/.gemini/memory/mem`
 
-A CLI `mem` foi escrita em Python puro e fornece a interface completa de gestão das 7 memórias.
+A CLI `mem` foi construída em Python puro (sem dependências externas) sob Arquitetura Hexagonal, fornecendo a interface completa de gestão das 7 memórias:
 
 | Comando | Sintaxe | Descrição & Exemplo de Uso |
 |---|---|---|
-| **`init`** | `mem init [--user <nome>] [--lang <idioma>] [--workspace <path>] [--force]` | Inicializa o banco SQLite L2, cria as tabelas FTS5 e gera o `CORE.md`.<br/>`mem init --user "Dev" --lang "pt-BR" --workspace "~/dev"` |
-| **`search`** | `mem search "<query>" [--ns <namespace>] [--limit <N>]` | Busca híbrida FTS5 com BM25 + Popularidade + Recency + Sinônimos.<br/>`mem search "connection pool postgres" --ns postgres` |
-| **`get`** | `mem get <namespace> "<topic>"` | Recupera o conteúdo integral de um tópico e incrementa seu contador de acessos.<br/>`mem get global "user-profile"` |
-| **`upsert`** | `mem upsert <namespace> <kind> "<topic>" "<content>" ["<tags>"] [--ttl <dias>]` | Insere ou atualiza um tópico com TTL opcional em dias. Tipos válidos: `fact`, `learning` (com `[DEAD-ENDS]`), `behavior`, `decision`, `invariant`, `playbook`.<br/>`mem upsert postgres invariant "max-connections" "Limite máximo de conexões: 100" "db,pool" --ttl 90` |
-| **`verify`** | `mem verify <namespace> "<topic>"` | Revalida e confirma a atualidade de um registro sujeito a TTL, estendendo seu ciclo de validade sem alterar o conteúdo.<br/>`mem verify postgres "max-connections"` |
-| **`recall-error`** | `mem recall-error "<erro>" [--ns <ns>] [--limit <N>]` | Busca episódica de soluções de bugs passados e lições aprendidas (incluindo tentativas e dead-ends descartados).<br/>`mem recall-error "PSQLException: Connection refused"` |
-| **`link`** | `mem link <src_ns>:<src_topic> <relation> <dst_ns>:<dst_topic>` | Cria aresta no grafo semântico (`depends_on`, `implements`, `optimizes`, etc.).<br/>`mem link auth:jwt-config depends_on security:rsa-keys` |
-| **`defer`** | `mem defer <namespace> "<trigger_cond>" "<action>"` | Registra pendência na memória prospectiva para execução futura (inclui dead-ends/tentativas falhas se houver).<br/>`mem defer devops "Ao atualizar para Node 22" "Revisar flags do V8 [DEAD-ENDS: flag --no-opt falhou]"` |
+| **`init`** | `mem init [--user <nome>] [--lang <idioma>] [--workspace <path>] [--force]` | Inicializa o banco SQLite L2 em modo WAL (`user_version = 2`), semeia os sinônimos técnicos e gera o `CORE.md` a partir do template (ou do fallback embutido `DEFAULT_CORE_TEMPLATE`).<br/>`mem init --user "Dev" --lang "pt-BR" --workspace "~/dev"` |
+| **`search`** | `mem search "<query>" [--ns <namespace>] [--limit <N>]` | Busca híbrida FTS5 com **BM25 normalizado** (`-1.0 * bm25`) + boost de Popularidade + Recency + expansão automática de Sinônimos.<br/>`mem search "connection pool postgres" --ns postgres` |
+| **`get`** | `mem get <namespace> "<topic>"` | Recupera o conteúdo integral de um tópico, exibe conexões do grafo semântico e incrementa o contador de acessos.<br/>`mem get global "user-profile"` |
+| **`upsert`** | `mem upsert <namespace> <kind> "<topic>" "<content>" ["<tags>"] [--ttl <dias>]` | Insere ou atualiza um tópico de forma atômica com suporte a TTL. Tipos válidos: `fact`, `learning` (com `[DEAD-ENDS]`), `behavior`, `decision`, `invariant`, `playbook`.<br/>`mem upsert postgres invariant "max-connections" "Limite máximo: 100" "db,pool" --ttl 90` |
+| **`verify`** | `mem verify <namespace> "<topic>" [--ttl <dias>]` | Revalida e confirma a atualidade de um registro sujeito a TTL, estendendo seu ciclo de validade temporal sem alterar o conteúdo.<br/>`mem verify postgres "max-connections"` |
+| **`recall-error`** | `mem recall-error "<erro>" [--ns <ns>] [--limit <N>]` | Busca episódica de soluções de bugs passados com **split de identificadores** (`CamelCase`, `snake_case`), filtro de `ERROR_STOPWORDS` e seleção dos 24 termos mais específicos.<br/>`mem recall-error "PSQLException: Connection refused"` |
+| **`link`** | `mem link <src_ns>:<src_topic> <relation> <dst_ns>:<dst_topic>` | Cria aresta direcionada no grafo semântico (`DEPENDS_ON`, `RELATES_TO`, `SUPERSEDES`).<br/>`mem link auth:jwt-config DEPENDS_ON security:rsa-keys` |
+| **`defer`** | `mem defer <namespace> "<trigger_cond>" "<action>"` | Registra pendência na memória prospectiva para execução futura (com registro de dead-ends se houver).<br/>`mem defer devops "Ao atualizar para Node 22" "Revisar flags do V8 [DEAD-ENDS: flag --no-opt falhou]"` |
 | **`due`** | `mem due [--ns <namespace>]` | Lista todas as tarefas prospectivas pendentes para um domínio ou projeto.<br/>`mem due --ns devops` |
 | **`done`** | `mem done <task_id>` | Marca uma tarefa da memória prospectiva como concluída.<br/>`mem done 3` |
-| **`export-md`** | `mem export-md [dir]` | Exporta todos os tópicos do banco L2 para uma árvore de arquivos Markdown com frontmatter YAML (padrão: `~/.gemini/memory/wiki`). Compatível com Obsidian e Logseq.<br/>`mem export-md ~/docs/wiki` |
-| **`import-md`** | `mem import-md [dir]` | Importa arquivos Markdown de uma pasta de volta para o SQLite FTS5 L2 com parsing de frontmatter e upsert automático.<br/>`mem import-md ~/docs/wiki` |
-| **`syn`** | `mem syn [list \| add <termo> "<sin1,sin2,...>"]` | Gerencia a expansão de sinônimos técnicos no ranking de busca FTS5.<br/>`mem syn add orm "drizzle,prisma,typeorm"` |
-| **`promote`** | `mem promote [--ns <ns>] [--limit <N>] [--by hits\|recent] [--min-hits <N>]` | Sugere tópicos mais acessados do L2 para promoção ao `CORE.md`.<br/>`mem promote --by hits --min-hits 5` |
-| **`check-core`** | `mem check-core` | Valida se `CORE.md` respeita o limite estrito de 60 linhas do orçamento L1.<br/>`mem check-core` |
+| **`export-md`** | `mem export-md [dir] [--ns <ns>]` | Exporta todos os tópicos do banco L2 para uma árvore de arquivos Markdown com frontmatter YAML e **prevenção de colisão de arquivos por hash SHA-256** (`_safe_filename`). Compatível com Obsidian e Logseq.<br/>`mem export-md ~/docs/wiki` |
+| **`import-md`** | `mem import-md [dir]` | Importa arquivos Markdown de volta para o SQLite FTS5 L2 com parsing de frontmatter e restauração de arestas semânticas.<br/>`mem import-md ~/docs/wiki` |
+| **`syn`** *(alias: `syn-list`)* | `mem syn [list \| add <termo> "<sin1,sin2,...>"]` | Gerencia a expansão de sinônimos técnicos dinâmicos no ranking de busca FTS5.<br/>`mem syn add orm "drizzle,prisma,typeorm"` ou `mem syn-list` |
+| **`promote`** | `mem promote [--ns <ns>] [--limit <N>] [--by hits\|recent] [--min-hits <N>]` | Sugere tópicos mais acessados do L2 para promoção ao `Semantic Directory` do `CORE.md`.<br/>`mem promote --by hits --min-hits 5` |
+| **`check-core`** | `mem check-core` | Valida o orçamento do `CORE.md` ($\le 60$ linhas) retornando **exit code 1 bloqueante** se excedido e lista tarefas prospectivas pendentes.<br/>`mem check-core` |
 | **`list`** | `mem list [--ns <namespace>]` | Lista todos os tópicos e metadados cadastrados em um namespace.<br/>`mem list --ns postgres` |
-| **`stats`** | `mem stats` | Exibe estatísticas consolidadas de memórias, arestas do grafo e tarefas pendentes.<br/>`mem stats` |
-| **`delete`** | `mem delete <namespace> "<topic>"` | Remove um tópico e limpa índices associados e arestas no grafo.<br/>`mem delete postgres "old-config"` |
+| **`stats`** *(alias: `status`)* | `mem stats` *(ou `mem status`)* | Exibe estatísticas consolidadas de armazenamento, hit ratios, registros obsoletos (stale TTL) e conexões do grafo.<br/>`mem stats` |
+| **`delete`** | `mem delete <namespace> "<topic>"` | Remove um tópico e limpa índices FTS5 associados e arestas no grafo.<br/>`mem delete postgres "old-config"` |
 
 ---
 
-## 🔒 Diretrizes de Segurança & Privacidade
+## 🔒 Diretrizes de Segurança & Governança
 
-1. **Single Source of Truth para Identidade:** Nenhum dado pessoal (nome, email, chaves ou caminhos privados) deve ser hardcoded em arquivos versionados (`GEMINI.md`, `AGENT.md`, `COMMON_INSTRUCTIONS.md`). Toda identidade reside no `CORE.md` e em `archival.db`, que permanecem exclusivamente na máquina local do desenvolvedor.
-2. **Proibição Absoluta de Commits/Pushes Autônomos:** Nenhum agente tem permissão para executar comandos `git commit` ou `git push` de forma autônoma sem a aprovação explícita e direta do usuário no chat.
-3. **Isolamento de Estado:** O arquivo `.gitignore` protege ativamente sua privacidade, garantindo que suas notas, memórias aprendidas e dados operacionais nunca sejam enviados para repositórios públicos acidentalmente.
-4. **Execução Local & Zero Dependências:** O motor de memória opera 100% offline via SQLite local, garantindo latência próxima de zero, resiliência total e soberania sobre seus dados técnicos.
+1. **Regra Arquitetural Single-Writer para o L1 (`CORE.md`):** Nenhum subagente tem permissão para escrever em `~/.gemini/memory/CORE.md`. Toda alteração no cache quente de contexto é consolidada exclusivamente pelo `orchestrator` no fechamento do Fan-In, eliminando qualquer risco de race condition.
+2. **Governança Estrita de Git (`agent-git`):**
+   * **Proibição Absoluta de Commits/Pushes Autônomos:** Nenhum agente executa `git commit` ou `git push` por iniciativa própria. Toda alteração versionada requer autorização prévia e expressa do usuário no turno.
+   * **Invariante Obrigatório de Formato de Commit (3 Blocos):**
+     1. **Título (Conventional Commits):** `<type>(<scope>): <resumo imperativo conciso>`.
+     2. **Descrição da Alteração em Prosa:** Parágrafo denso e explicativo contextualizando o *porquê* da alteração, o problema resolvido e a decisão técnica (**proibido saltar direto do título para bullets!**).
+     3. **Lista de Alterações Estruturada:** Bullets detalhando o quê e como foi alterado em cada componente afetado.
+   * **Padronização de Pull Requests (PRs):** Estruturação obrigatória em 4 blocos (Título, Contexto & Motivação, Lista de Alterações Realizadas, Como Foi Validado/Testes).
+3. **Single Source of Truth para Identidade:** Dados pessoais e de perfil (nome, email, chaves ou caminhos privados) nunca são hardcoded em arquivos versionados (`GEMINI.md`, `AGENT.md`, `COMMON_INSTRUCTIONS.md`). Toda identidade reside dinamicamente no `CORE.md` e em `archival.db`.
+4. **Isolamento de Estado:** O arquivo `.gitignore` protege ativamente sua privacidade, garantindo que notas, dados de projetos e bancos locais nunca vazem para repositórios públicos.
+5. **Execução Local & Zero Dependências:** O motor de memória opera 100% offline via SQLite local com suporte a WAL e file locks POSIX, assegurando latência zero, integridade transacional e soberania total sobre seus dados técnicos.
 
 ---
 

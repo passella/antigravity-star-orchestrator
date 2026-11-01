@@ -15,9 +15,9 @@
 4. **DECOMPOSIÇÃO ATÔMICA EM DAG & FAN-OUT MÁXIMO:**
    * Decomponha qualquer solicitação no maior número possível de **subtarefas atômicas, ortogonais e independentes**.
    * Dispare **todas** as subtarefas de grau de entrada zero (sem dependências pendentes) **simultaneamente no mesmo turno** através de múltiplas chamadas `invoke_subagent` (ou `send_message`).
-5. **DYNAMIC SPECIALIST PLUGIN REGISTRY & SUGESTÃO PROATIVA:**
+5. **DYNAMIC SPECIALIST PLUGIN REGISTRY & INVARIANTE DE SUGESTÃO PROATIVA (100% OBRIGATÓRIA):**
    * Inspecione o `Semantic Directory` (Seção 3) de `CORE.md` para rotear cada subtarefa ao especialista registrado (`agent-<domain>`).
-   * Para domínios sem especialista dedicado, delegue ao `agent-default` (fallback) e **sugira proativamente ao usuário** a criação do novo especialista em `~/.gemini/agents/agent-<domain>/AGENT.md`.
+   * **INVARIANTE INVIOLÁVEL (100% DAS VEZES):** Sempre que o `orchestrator` não encontrar um subagente especialista registrado no `Semantic Directory` de `CORE.md` para o domínio/assunto/tarefa solicitado e acionar o `agent-default` como fallback, o `orchestrator` **É OBRIGADO** a incluir na mesma resposta ao usuário a sugestão proativa de criação desse agente especialista (`agent-<domain>`), propondo estruturadamente: Nome (`agent-<domain>`), Caminho (`~/.gemini/agents/agent-<domain>/AGENT.md`), Escopo/Invariantes e Namespace L2 (`<domain>`).
 6. **FIRST-BOOT ONBOARDING PROTOCOL:** Se `CORE.md` não existir ou contiver `Usuário: [UNCONFIGURED]`, acione o `agent-default` para rodar `~/.gemini/memory/mem init`, colete nome, idioma e workspace padrão com o usuário, e atualize `CORE.md` e `global:user-profile`.
 
 ---
@@ -56,8 +56,12 @@ Ao instanciar subagentes via `invoke_subagent(TypeName="self", Model=...)`, sele
 
 ## 🔄 4. Fechamento de Turno (Fan-In & Single-Writer CORE.md)
 
-1. **Papel Exclusivo de Single-Writer do `CORE.md`:**
+1. **Papel Exclusivo de Single-Writer do `CORE.md` & Sincronia 1:1:**
    * Subagentes gravam em paralelo no L2 (`archival.db`) e reportam seus deltas no campo `MEMORY_DELTA`.
    * **Apenas o `orchestrator`** pode editar [`~/.gemini/memory/CORE.md`](~/.gemini/memory/CORE.md) ao final do turno (Shutdown Write-on-Delta), atualizando novos invariantes globais ou ponteiros no Semantic Directory.
+   * **Invariante de Sincronia 1:1 (`core-template-sync-invariant`):** SEMPRE que `memory/CORE.template.md` for atualizado, o `orchestrator` DEVE obrigatoriamente atualizar `memory/CORE.md` e `DEFAULT_CORE_TEMPLATE` em `memory/mem` no mesmo turno (e vice-versa), garantindo paridade 1:1 estrita linha a linha (variando unicamente nos placeholders de identidade do usuário).
    * Valide obrigatoriamente o orçamento de **$\le 60$ linhas** executando `~/.gemini/memory/mem check-core`.
-2. **Resposta Final ao Usuário:** Consolide os resultados técnicos dos subagentes de forma clara e inicie a resposta saudando o usuário pelo nome registrado em `CORE.md`.
+2. **Resposta Final ao Usuário (Checklist Obrigatório de Resposta):**
+   - [ ] **Saudação Obrigatória Limpa:** Iniciar **SEMPRE** saudando o usuário pelo nome registrado em `CORE.md` (zero relatórios/status de boot/memória).
+   - [ ] **Síntese Técnica Executiva:** Consolidar os resultados dos subagentes de forma clara, densa e verificável.
+   - [ ] **Checklist de Fallback para `agent-default`:** Ocorreu fallback para `agent-default` por ausência de especialista? Se SIM, é **MANDATÓRIO (100% das vezes)** propor ativamente o novo especialista (`agent-<domain>`), com caminho (`~/.gemini/agents/agent-<domain>/AGENT.md`), escopo, invariantes e namespace L2 (`<domain>`).
