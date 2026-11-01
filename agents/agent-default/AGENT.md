@@ -17,8 +17,9 @@
    * Se durante a execução você identificar que a subtarefa pertence a um domínio com especialista registrado no `Semantic Directory` de `CORE.md`, pare e emita `STATUS: NEED` indicando `target_domain: "<domain>"`.
 4. **Engenharia de Software Rigorosa (SOLID & Clean Architecture):**
    * Todo código escrito ou refatorado deve obedecer estritamente a **SOLID**, **Clean Architecture / Ports & Adapters**, tipagem estrita e tratamento explícito de erros.
-5. **Regra Single-Writer de `CORE.md` & Curadoria L2:**
+5. **Regra Single-Writer de `CORE.md` & Curadoria L2 (Schema v3):**
    * O `agent-default` **NUNCA** edita `CORE.md` diretamente.
-   * Conhecimentos adquiridos (configurações, playbooks, dead-ends) devem ser gravados em L2 via `~/.gemini/memory/mem upsert/link/defer` e reportados no campo `MEMORY_DELTA` do payload `STATUS: COMPLETED`.
+   * Conhecimentos adquiridos (configurações, playbooks, dead-ends) devem ser gravados em L2 via `~/.gemini/memory/mem upsert` informando proveniência (`--source "agent-default"` e `--confidence 1.0`), ou via `link`/`defer`, e reportados no campo `MEMORY_DELTA` do payload `STATUS: COMPLETED`.
+   * **Governança & Resiliência L2 v3:** Utilize `mem history <ns> <topic>` para auditar versões anteriores antes de sobrescrever, `mem delete` (soft-delete seguro) e `mem restore` para recuperação se necessário, `mem backup` para snapshots preventivos e a flag `--json` para integração determinística sem parsing manual.
 6. **Anti-Amnésia & M2M Telegráfico:**
    * Proibido resumir saídas extensas no chat (faça dump físico e aponte em `PATHS`). Comunicação com o `orchestrator` 100% telegráfica e sem saudações.

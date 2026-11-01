@@ -10,9 +10,10 @@
 1. **L1 Working Memory (`~/.gemini/memory/CORE.md`):** Orçamento estrito de **$\le 60$ linhas** (auditado por `mem check-core`).
    * **Regra Single-Writer:** Subagentes **NUNCA** editam `CORE.md` diretamente (evita conflitos de concorrência em Fan-Out).
    * Apenas o `orchestrator` atualiza `CORE.md` no fechamento do Fan-In quando surgem novos invariantes ou ponteiros de domínio.
-2. **L2 Archival & Cognitive Engine (`~/.gemini/memory/mem`):**
-   * Banco SQLite WAL + FTS5 com concorrência segura (`busy_timeout=30000`). Subagentes podem ler e gravar em paralelo.
-   * **Namespaces:** Use `<dominio>` (ex: `postgres`, `default`) para padrões reutilizáveis transversais e `proj:<repo>` para especificidades de um projeto local.
+2. **L2 Archival & Cognitive Engine (`~/.gemini/memory/mem` — Schema v3):**
+   * Banco SQLite WAL + FTS5 com concorrência segura (`busy_timeout=30000`) e file locking cross-platform. Subagentes podem ler e gravar em paralelo.
+   * **Schema L2 v3:** Suporte a versionamento histórico com trilha de auditoria (`memory_history`), proveniência de dados (`source` e `confidence`), soft-delete reversível por padrão (`restore`), backups online consistentes (`backup`) e saída estruturada programática (`--json`).
+   * **Namespaces:** Use `<dominio>` (ex: `postgres`, `rust`, `default`) para padrões reutilizáveis transversais e `proj:<repo>` para especificidades de um projeto local.
 3. **As 7 Memórias Cognitivas (`kind`):**
    * `fact`: Fatos declarativos, versões, portas, paths e configs (TTL padrão: 30 dias).
    * `learning`: Diagnósticos e lições aprendidas pós-correção de bugs. **Obrigatório** incluir a seção `[DEAD-ENDS / TENTATIVAS DESCARTADAS]` com abordagens que falharam e o motivo.
@@ -24,23 +25,30 @@
 
 ---
 
-## 2. Referência Rápida da CLI `~/.gemini/memory/mem`
+## 2. Referência Rápida da CLI `~/.gemini/memory/mem` (Schema v3)
 
 * **Busca Híbrida (BM25 + Recência + Hits + Sinônimos):**
-  `~/.gemini/memory/mem search "<query>" [--ns <ns>] [--limit 5]`
+  `~/.gemini/memory/mem search "<query>" [--ns <ns>] [--limit 5] [--json]`
 * **Leitura Exata + Links do Grafo:**
-  `~/.gemini/memory/mem get <ns> "<topic>"`
-* **Gravação Atômica (Upsert):**
-  `~/.gemini/memory/mem upsert <ns> <kind> "<topic>" "<conteudo>" ["<tags>"] [--ttl <dias|none>]`
+  `~/.gemini/memory/mem get <ns> "<topic>" [--json]`
+* **Gravação Atômica (Upsert) com Proveniência & Versionamento:**
+  `~/.gemini/memory/mem upsert <ns> <kind> "<topic>" "<conteudo>" ["<tags>"] [--ttl <dias|none>] [--source "<agente>"] [--confidence <0.0..1.0>]`
+* **Histórico de Alterações & Auditoria (Versionamento L2 v3):**
+  `~/.gemini/memory/mem history <ns> "<topic>" [--limit 10] [--json]`
+* **Remoção Segura (Soft-Delete por Padrão) & Restauração:**
+  `~/.gemini/memory/mem delete <ns> "<topic>" [--hard]` *(sem `--hard`, marca `deleted_at` permitindo rollback)*
+  `~/.gemini/memory/mem restore <ns> "<topic>"` *(recupera tópico soft-deleted de volta ao índice ativo)*
+* **Backup Consistente Online (Zero Downtime / Sem Lock Exclusivo):**
+  `~/.gemini/memory/mem backup [caminho_destino.db]`
 * **Revalidação de Frescor (TTL):**
   `~/.gemini/memory/mem verify <ns> "<topic>" [--ttl <dias|none>]`
 * **Recall Episódico de Erros/Stacktraces:**
-  `~/.gemini/memory/mem recall-error "<snippet_ou_stacktrace>" [--ns <ns>]`
+  `~/.gemini/memory/mem recall-error "<snippet_ou_stacktrace>" [--ns <ns>] [--json]`
 * **Grafo Semântico (Arestas Direcionadas):**
   `~/.gemini/memory/mem link <src_ns>:<src_topic> <DEPENDS_ON|RELATES_TO|SUPERSEDES> <dst_ns>:<dst_topic>`
 * **Memória Prospectiva (Pendências Futuras):**
   * Agendar: `~/.gemini/memory/mem defer <ns> "<gatilho>" "<acao_futura_e_dead_ends>"`
-  * Listar: `~/.gemini/memory/mem due [--ns <ns>]`
+  * Listar: `~/.gemini/memory/mem due [--ns <ns>] [--json]`
   * Concluir: `~/.gemini/memory/mem done <task_id>`
 * **Sinônimos Técnicos Dinâmicos:**
   `~/.gemini/memory/mem syn [list | add <termo> "<sin1,sin2,...>"]`
@@ -48,6 +56,8 @@
   `~/.gemini/memory/mem check-core` | `~/.gemini/memory/mem promote [--ns <ns>]`
 * **Interoperabilidade Wiki Markdown (Obsidian/Logseq):**
   `~/.gemini/memory/mem export-md [dir] [--ns <ns>]` | `~/.gemini/memory/mem import-md [dir]`
+* **Integração Programática M2M (`--json`):**
+  A flag `--json` está disponível em `search`, `get`, `recall-error`, `due`, `history`, `list` e `stats` para consumo estruturado sem parsing de texto.
 
 ---
 

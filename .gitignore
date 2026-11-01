@@ -17,3 +17,5 @@
 !memory/
 !memory/mem
 !memory/CORE.template.md
+!memory/tests/
+!memory/tests/**

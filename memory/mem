@@ -2,11 +2,14 @@
 """
 Antigravity Tier-2 Archival & Cognitive Memory Engine.
 Refactored with Clean Architecture (Ports & Adapters), SOLID principles,
-Concurrency-safe SQLite WAL + busy_timeout, POSIX File Locking, and Normalized FTS5 BM25 Ranking.
+Concurrency-safe SQLite WAL + busy_timeout, Cross-Platform File Locking,
+Normalized FTS5 BM25 Ranking, Schema L2 v3 (Versioning, Provenance & Soft-Delete),
+and Resilient Markdown Wiki Interoperability.
 """
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 import re
 import sqlite3
@@ -20,8 +23,13 @@ try:
 except ImportError:
     fcntl = None  # type: ignore[assignment]
 
-SCHEMA_VERSION = 2
-CORE_MAX_LINES = 60
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None  # type: ignore[assignment]
+
+SCHEMA_VERSION = 3
+DEFAULT_CORE_MAX_LINES = 60
 VALID_KINDS = ("fact", "learning", "behavior", "decision", "invariant", "playbook")
 
 DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — Hot In-Context Cache)
@@ -36,18 +44,17 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
   2. **Git Seguro:** Proibição absoluta de `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
   3. **Topologia Estrela + DAG Fan-Out:** Decomposição atômica máxima, disparo paralelo e Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`).
   4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In (sincronia 1:1 obrigatória com `CORE.template.md`). Subagentes gravam em L2 (`mem`) e reportam deltas.
-  5. **Sugestão Proativa de Especialista (100% Obrigatória):** Em todo fallback para `agent-default` por falta de especialista, propor novo `agent-<domain>` na resposta.
+  5. **Sugestão Proativa de Especialista (Calibrada):** Em todo fallback para `agent-default` em domínio especializado recorrente, propor novo `agent-<domain>`.
   6. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas.
 
 ## 🗺️ 2. Ambiente Ativo & Caminhos-Chave
 - **Workspace Padrão:** {{DEFAULT_WORKSPACE}}
 - **Constituição & Agentes:** `~/.gemini/GEMINI.md` | `~/.gemini/agents/{COMMON_INSTRUCTIONS.md,*/AGENT.md}`
-- **Motor Cognitivo L2:** `~/.gemini/memory/archival.db` (CLI: `~/.gemini/memory/mem`)
+- **Motor Cognitivo L2:** `~/.gemini/memory/archival.db` (CLI: `~/.gemini/memory/mem` — Schema v3)
 
 ## 🧭 3. Semantic Directory (Ponteiros L2 & Plugins Especialistas)
 > *Consulte L2 (`~/.gemini/memory/mem search "<termo>" [--ns <dominio>]`) apenas quando a subtarefa envolver os tópicos abaixo:*
 - **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`, `proactive-specialist-suggestion`, `core-template-sync-invariant`.
-- **`git`** (`~/.gemini/agents/agent-git/AGENT.md`): Mensagens de commit (Título+Descrição+Lista), PRs, semântica de diffs e governança read-only.
 - **`default`** (`~/.gemini/agents/agent-default/AGENT.md`): Fallback generalista (Shell, Linux, Python/scripts, Web Search, Bootstrap).
 <!-- Especialistas: - **<domain>** (~/.gemini/agents/agent-<domain>/AGENT.md): Resumo de invariantes -->
 <!-- Projetos: - **proj:<name>**: Tópicos indexados em L2 -->
@@ -107,7 +114,26 @@ class MemoryRecord:
     ttl_days: int | None
     created_at: str
     updated_at: str
+    version: int = 1
+    source: str = "manual"
+    confidence: float = 1.0
+    deleted_at: str | None = None
     score: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryHistoryRecord:
+    id: int
+    memory_id: int
+    namespace: str
+    kind: str
+    topic: str
+    content: str
+    tags: str
+    version: int
+    source: str
+    confidence: float
+    archived_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +172,8 @@ class StorageStats:
     total_tasks_count: int
     edges_count: int
     synonyms_count: int
+    soft_deleted_count: int
+    history_versions_count: int
     top_records: Sequence[MemoryRecord]
 
 
@@ -157,6 +185,9 @@ class WikiDocument:
     tags: str = ""
     access_count: int = 0
     ttl_days: int | None = None
+    version: int = 1
+    source: str = "manual"
+    confidence: float = 1.0
     created_at: str | None = None
     updated_at: str | None = None
     links: list[str] = field(default_factory=list)
@@ -175,12 +206,26 @@ class ClockPort(Protocol):
 
 class MemoryRepositoryPort(Protocol):
     def initialize(self, foundational_records: Sequence[tuple[str, str, str, str, str]], ts: str) -> None: ...
-    def upsert(self, namespace: str, kind: str, topic: str, content: str, tags: str, ttl_days: int | None, ts: str) -> None: ...
+    def upsert(
+        self,
+        namespace: str,
+        kind: str,
+        topic: str,
+        content: str,
+        tags: str,
+        ttl_days: int | None,
+        ts: str,
+        source: str = "manual",
+        confidence: float = 1.0,
+    ) -> None: ...
     def verify_freshness(self, namespace: str, topic: str, new_ttl: int | None, update_ttl: bool, ts: str) -> int | None: ...
     def get_by_topic(self, namespace: str, topic: str, increment_hit: bool = True) -> tuple[MemoryRecord, Sequence[SemanticEdge]]: ...
     def search_fts(self, fts_query: str, namespace: str | None, limit: int, prioritize_episodic: bool = False) -> Sequence[MemoryRecord]: ...
     def list_records(self, namespace: str | None) -> Sequence[MemoryRecord]: ...
-    def delete_record(self, namespace: str, topic: str) -> bool: ...
+    def delete_record(self, namespace: str, topic: str, hard: bool = False, ts: str = "") -> bool: ...
+    def restore_record(self, namespace: str, topic: str, ts: str) -> bool: ...
+    def get_history(self, namespace: str, topic: str) -> tuple[MemoryRecord | None, Sequence[MemoryHistoryRecord]]: ...
+    def hot_backup(self, dest_path: str) -> str: ...
     def get_promotion_candidates(self, namespace: str | None, by: str, min_hits: int, limit: int) -> Sequence[MemoryRecord]: ...
     def link_topics(self, src_ns: str, src_topic: str, relation: str, dst_ns: str, dst_topic: str, ts: str) -> None: ...
     def defer_task(self, namespace: str, trigger_cond: str, action: str, ts: str) -> int: ...
@@ -199,6 +244,18 @@ class MemoryRepositoryPort(Protocol):
 
 class DomainPolicy:
     @staticmethod
+    def get_core_max_lines() -> int:
+        env_val = os.environ.get("ANTIGRAVITY_CORE_MAX_LINES")
+        if env_val:
+            try:
+                val = int(env_val.strip())
+                if val > 0:
+                    return val
+            except ValueError:
+                pass
+        return DEFAULT_CORE_MAX_LINES
+
+    @staticmethod
     def validate_namespace(ns: str) -> None:
         if not ns or not (DOMAIN_NAMESPACE_PATTERN.match(ns) or PROJECT_NAMESPACE_PATTERN.match(ns)):
             raise DomainValidationError(
@@ -209,6 +266,11 @@ class DomainPolicy:
     def validate_kind(kind: str) -> None:
         if kind not in VALID_KINDS:
             raise DomainValidationError(f"Invalid kind '{kind}'. Must be one of {VALID_KINDS}")
+
+    @staticmethod
+    def validate_confidence(confidence: float) -> None:
+        if confidence < 0.0 or confidence > 1.0:
+            raise DomainValidationError(f"Invalid confidence '{confidence}'. Must be a float between 0.0 and 1.0")
 
     @staticmethod
     def parse_ttl(ttl_arg: str | int | None, kind: str, is_verify: bool = False) -> tuple[int | None, bool]:
@@ -352,11 +414,24 @@ def file_lock(lock_path: str) -> Iterator[None]:
     with open(lock_path, "a+", encoding="utf-8") as lf:
         if fcntl is not None:
             fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None and os.name == "nt":
+            lf.seek(0)
+            if os.fstat(lf.fileno()).st_size == 0:
+                lf.write("\0")
+                lf.flush()
+            lf.seek(0)
+            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
         try:
             yield
         finally:
             if fcntl is not None:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None and os.name == "nt":
+                try:
+                    lf.seek(0)
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
 
 
 @contextlib.contextmanager
@@ -402,6 +477,7 @@ class SqliteMemoryRepository:
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is not None:
             return self._conn
+        os.makedirs(os.path.dirname(os.path.abspath(self._db_path)), exist_ok=True)
         conn = sqlite3.connect(self._db_path, timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=30000;")
@@ -415,8 +491,27 @@ class SqliteMemoryRepository:
         self._conn = conn
         return conn
 
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         with immediate_transaction(conn):
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            # 1. Formal schema_migrations tracking table
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL,
+                    description TEXT NOT NULL
+                );
+                """
+            )
+
+            # 2. Memories table setup or migration
             row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
             if row is None:
                 conn.executescript(
@@ -430,12 +525,17 @@ class SqliteMemoryRepository:
                         tags TEXT DEFAULT '',
                         access_count INTEGER DEFAULT 0,
                         ttl_days INTEGER DEFAULT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0.0 AND confidence <= 1.0),
+                        deleted_at TEXT DEFAULT NULL,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         UNIQUE(namespace, topic)
                     );
 
                     CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);
 
                     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                         topic,
@@ -447,21 +547,24 @@ class SqliteMemoryRepository:
                         tokenize='unicode61 remove_diacritics 2'
                     );
 
-                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories WHEN new.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
                         VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
                     END;
 
-                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories WHEN old.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
                     END;
 
-                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
+                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                        VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                        SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
+                        WHERE old.deleted_at IS NULL;
+
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                        VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                        SELECT new.id, new.topic, new.content, new.tags, new.namespace
+                        WHERE new.deleted_at IS NULL;
                     END;
                     """
                 )
@@ -480,6 +583,10 @@ class SqliteMemoryRepository:
                             tags TEXT DEFAULT '',
                             access_count INTEGER DEFAULT 0,
                             ttl_days INTEGER DEFAULT NULL,
+                            version INTEGER NOT NULL DEFAULT 1,
+                            source TEXT NOT NULL DEFAULT 'manual',
+                            confidence REAL NOT NULL DEFAULT 1.0 CHECK(confidence >= 0.0 AND confidence <= 1.0),
+                            deleted_at TEXT DEFAULT NULL,
                             created_at TEXT NOT NULL,
                             updated_at TEXT NOT NULL,
                             UNIQUE(namespace, topic)
@@ -491,21 +598,6 @@ class SqliteMemoryRepository:
                         DROP TRIGGER IF EXISTS memories_au;
                         DROP TABLE memories;
                         ALTER TABLE memories_new RENAME TO memories;
-                        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                            INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                            VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                        END;
-                        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                            INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                            VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                        END;
-                        CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace ON memories BEGIN
-                            INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
-                            VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                            INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
-                            VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                        END;
-                        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
                         """
                     )
                     conn.execute("PRAGMA foreign_keys=ON;")
@@ -513,10 +605,69 @@ class SqliteMemoryRepository:
                 cols = [col[1] for col in conn.execute("PRAGMA table_info(memories)").fetchall()]
                 if "ttl_days" not in cols:
                     conn.execute("ALTER TABLE memories ADD COLUMN ttl_days INTEGER DEFAULT NULL;")
-                conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);")
+                if "version" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN version INTEGER NOT NULL DEFAULT 1;")
+                if "source" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';")
+                if "confidence" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
+                if "deleted_at" not in cols:
+                    conn.execute("ALTER TABLE memories ADD COLUMN deleted_at TEXT DEFAULT NULL;")
 
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);")
+
+                # Replace triggers with soft-delete-aware triggers and rebuild FTS5 index
+                conn.executescript(
+                    """
+                    DROP TRIGGER IF EXISTS memories_ai;
+                    DROP TRIGGER IF EXISTS memories_ad;
+                    DROP TRIGGER IF EXISTS memories_au;
+
+                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories WHEN new.deleted_at IS NULL BEGIN
+                        INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                        VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories WHEN old.deleted_at IS NULL BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                        VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
+                        INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
+                        SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
+                        WHERE old.deleted_at IS NULL;
+
+                        INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                        SELECT new.id, new.topic, new.content, new.tags, new.namespace
+                        WHERE new.deleted_at IS NULL;
+                    END;
+
+                    INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+                    """
+                )
+
+            # 3. Memory history table
             conn.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS memory_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    memory_id INTEGER NOT NULL,
+                    namespace TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    topic TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    source TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_history_mem_id ON memory_history(memory_id);
+                CREATE INDEX IF NOT EXISTS idx_history_ns_topic ON memory_history(namespace, topic);
+
                 CREATE TABLE IF NOT EXISTS memory_edges (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     source_id INTEGER NOT NULL,
@@ -550,6 +701,7 @@ class SqliteMemoryRepository:
                 """
             )
 
+            # 4. Populate default synonyms if empty
             syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
             if syn_count == 0:
                 for group in DEFAULT_SYNONYM_GROUPS:
@@ -561,10 +713,25 @@ class SqliteMemoryRepository:
                             (term, expanded),
                         )
 
+            # 5. Populate formal migrations log
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (1, ?, ?)",
+                (ts, "Initial L2 schema (memories, FTS5)"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (2, ?, ?)",
+                (ts, "Graph edges, prospective tasks, dynamic synonyms"),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (3, ?, ?)",
+                (ts, "Versioning, provenance (source, confidence), soft-delete, memory history and schema_migrations"),
+            )
+
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
 
     @staticmethod
     def _row_to_record(r: sqlite3.Row, score: float = 0.0) -> MemoryRecord:
+        keys = r.keys()
         return MemoryRecord(
             id=r["id"],
             namespace=r["namespace"],
@@ -574,8 +741,12 @@ class SqliteMemoryRepository:
             tags=r["tags"] or "",
             access_count=r["access_count"],
             ttl_days=r["ttl_days"],
-            created_at=r["created_at"] if "created_at" in r.keys() else r["updated_at"],
+            created_at=r["created_at"] if "created_at" in keys else r["updated_at"],
             updated_at=r["updated_at"],
+            version=r["version"] if "version" in keys else 1,
+            source=r["source"] if "source" in keys else "manual",
+            confidence=float(r["confidence"]) if "confidence" in keys else 1.0,
+            deleted_at=r["deleted_at"] if "deleted_at" in keys else None,
             score=score,
         )
 
@@ -586,37 +757,85 @@ class SqliteMemoryRepository:
             for ns, kind, topic, content, tags in foundational_records:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)
+                    INSERT OR IGNORE INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, version, source, confidence, deleted_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 0, NULL, 1, 'manual', 1.0, NULL, ?, ?)
                     """,
                     (ns, kind, topic, content, tags, ts, ts),
                 )
 
-    def upsert(self, namespace: str, kind: str, topic: str, content: str, tags: str, ttl_days: int | None, ts: str) -> None:
+    def upsert(
+        self,
+        namespace: str,
+        kind: str,
+        topic: str,
+        content: str,
+        tags: str,
+        ttl_days: int | None,
+        ts: str,
+        source: str = "manual",
+        confidence: float = 1.0,
+    ) -> None:
         conn = self._get_conn()
         with immediate_transaction(conn):
-            conn.execute(
-                """
-                INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
-                ON CONFLICT(namespace, topic) DO UPDATE SET
-                    kind = excluded.kind,
-                    content = excluded.content,
-                    tags = excluded.tags,
-                    ttl_days = excluded.ttl_days,
-                    updated_at = excluded.updated_at
-                """,
-                (namespace, kind, topic, content, tags, ttl_days, ts, ts),
-            )
+            existing = conn.execute(
+                "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+                (namespace, topic),
+            ).fetchone()
+
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, version, source, confidence, deleted_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 0, ?, 1, ?, ?, NULL, ?, ?)
+                    """,
+                    (namespace, kind, topic, content, tags, ttl_days, source, confidence, ts, ts),
+                )
+            else:
+                # Archive previous active/soft-deleted state into memory_history
+                conn.execute(
+                    """
+                    INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        existing["id"],
+                        existing["namespace"],
+                        existing["kind"],
+                        existing["topic"],
+                        existing["content"],
+                        existing["tags"] or "",
+                        existing["version"],
+                        existing["source"],
+                        existing["confidence"],
+                        ts,
+                    ),
+                )
+                new_version = existing["version"] + 1
+                conn.execute(
+                    """
+                    UPDATE memories
+                    SET kind = ?,
+                        content = ?,
+                        tags = ?,
+                        ttl_days = ?,
+                        version = ?,
+                        source = ?,
+                        confidence = ?,
+                        deleted_at = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (kind, content, tags, ttl_days, new_version, source, confidence, ts, existing["id"]),
+                )
 
     def verify_freshness(self, namespace: str, topic: str, new_ttl: int | None, update_ttl: bool, ts: str) -> int | None:
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT id, ttl_days FROM memories WHERE namespace = ? AND topic = ?",
+            "SELECT id, ttl_days FROM memories WHERE namespace = ? AND topic = ? AND deleted_at IS NULL",
             (namespace, topic),
         ).fetchone()
         if not row:
-            raise ResourceNotFoundError(f"Memory not found: [{namespace}] topic='{topic}'")
+            raise ResourceNotFoundError(f"Active memory not found: [{namespace}] topic='{topic}'")
 
         effective_ttl = new_ttl if update_ttl else row["ttl_days"]
         with immediate_transaction(conn):
@@ -629,7 +848,7 @@ class SqliteMemoryRepository:
     def get_by_topic(self, namespace: str, topic: str, increment_hit: bool = True) -> tuple[MemoryRecord, Sequence[SemanticEdge]]:
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+            "SELECT * FROM memories WHERE namespace = ? AND topic = ? AND deleted_at IS NULL",
             (namespace, topic),
         ).fetchone()
         if not row:
@@ -652,6 +871,10 @@ class SqliteMemoryRepository:
                 ttl_days=rec.ttl_days,
                 created_at=rec.created_at,
                 updated_at=rec.updated_at,
+                version=rec.version,
+                source=rec.source,
+                confidence=rec.confidence,
+                deleted_at=rec.deleted_at,
             )
 
         out_edges = conn.execute(
@@ -659,7 +882,7 @@ class SqliteMemoryRepository:
             SELECT e.relation, m.namespace, m.topic
             FROM memory_edges e
             JOIN memories m ON e.target_id = m.id
-            WHERE e.source_id = ?
+            WHERE e.source_id = ? AND m.deleted_at IS NULL
             ORDER BY e.relation, m.namespace, m.topic
             """,
             (row["id"],),
@@ -669,7 +892,7 @@ class SqliteMemoryRepository:
             SELECT e.relation, m.namespace, m.topic
             FROM memory_edges e
             JOIN memories m ON e.source_id = m.id
-            WHERE e.target_id = ?
+            WHERE e.target_id = ? AND m.deleted_at IS NULL
             ORDER BY e.relation, m.namespace, m.topic
             """,
             (row["id"],),
@@ -688,17 +911,19 @@ class SqliteMemoryRepository:
     def search_fts(self, fts_query: str, namespace: str | None, limit: int, prioritize_episodic: bool = False) -> Sequence[MemoryRecord]:
         conn = self._get_conn()
         # memories_fts columns: topic (5.0), content (1.0), tags (3.0), namespace (0.5)
-        # SQLite bm25() returns negative values where more negative = better match.
-        # Inverting via (-1.0 * bm25(...)) yields a strictly positive relevance score ordered DESC.
+        # Multiply relevance by m.confidence to score higher-confidence memories accordingly.
+        # Filter strictly for deleted_at IS NULL.
         sql = """
             SELECT m.id, m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.created_at, m.updated_at,
+                   m.version, m.source, m.confidence, m.deleted_at,
                    (MAX(0.0001, -1.0 * bm25(memories_fts, 5.0, 1.0, 3.0, 0.5))
                     * (1.0 + 0.15 * MIN(m.access_count, 30))
+                    * m.confidence
                     / (1.0 + 0.02 * MAX(0.0, julianday('now') - julianday(m.updated_at)))) AS relevance_score,
                    CASE WHEN m.kind IN ('learning', 'playbook') THEN 1 ELSE 0 END AS episodic_boost
             FROM memories_fts
             JOIN memories m ON m.id = memories_fts.rowid
-            WHERE memories_fts MATCH ?
+            WHERE memories_fts MATCH ? AND m.deleted_at IS NULL
         """
         params: list[object] = [fts_query]
         if namespace:
@@ -731,6 +956,10 @@ class SqliteMemoryRepository:
                 ttl_days=r["ttl_days"],
                 created_at=r["created_at"],
                 updated_at=r["updated_at"],
+                version=r["version"],
+                source=r["source"],
+                confidence=float(r["confidence"]),
+                deleted_at=r["deleted_at"],
                 score=float(r["relevance_score"]),
             )
             for r in rows
@@ -740,23 +969,116 @@ class SqliteMemoryRepository:
         conn = self._get_conn()
         if namespace:
             rows = conn.execute(
-                "SELECT * FROM memories WHERE namespace = ? ORDER BY namespace, topic",
+                "SELECT * FROM memories WHERE namespace = ? AND deleted_at IS NULL ORDER BY namespace, topic",
                 (namespace,),
             ).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM memories ORDER BY namespace, topic").fetchall()
+            rows = conn.execute("SELECT * FROM memories WHERE deleted_at IS NULL ORDER BY namespace, topic").fetchall()
         return [self._row_to_record(r) for r in rows]
 
-    def delete_record(self, namespace: str, topic: str) -> bool:
+    def delete_record(self, namespace: str, topic: str, hard: bool = False, ts: str = "") -> bool:
         conn = self._get_conn()
         with immediate_transaction(conn):
-            cur = conn.execute("DELETE FROM memories WHERE namespace = ? AND topic = ?", (namespace, topic))
-        return cur.rowcount > 0
+            existing = conn.execute(
+                "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+                (namespace, topic),
+            ).fetchone()
+            if existing is None:
+                return False
+
+            if hard:
+                conn.execute("DELETE FROM memories WHERE id = ?", (existing["id"],))
+                return True
+            else:
+                if existing["deleted_at"] is not None:
+                    return False  # Already soft-deleted
+
+                # Archive version before soft-delete
+                conn.execute(
+                    """
+                    INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        existing["id"],
+                        existing["namespace"],
+                        existing["kind"],
+                        existing["topic"],
+                        existing["content"],
+                        existing["tags"] or "",
+                        existing["version"],
+                        existing["source"],
+                        existing["confidence"],
+                        ts,
+                    ),
+                )
+                conn.execute("UPDATE memories SET deleted_at = ? WHERE id = ?", (ts, existing["id"]))
+                return True
+
+    def restore_record(self, namespace: str, topic: str, ts: str) -> bool:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            existing = conn.execute(
+                "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+                (namespace, topic),
+            ).fetchone()
+            if existing is None or existing["deleted_at"] is None:
+                return False
+
+            conn.execute("UPDATE memories SET deleted_at = NULL, updated_at = ? WHERE id = ?", (ts, existing["id"]))
+            return True
+
+    def get_history(self, namespace: str, topic: str) -> tuple[MemoryRecord | None, Sequence[MemoryHistoryRecord]]:
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT * FROM memories WHERE namespace = ? AND topic = ?",
+            (namespace, topic),
+        ).fetchone()
+        current = self._row_to_record(row) if row else None
+
+        if row:
+            hist_rows = conn.execute(
+                "SELECT * FROM memory_history WHERE memory_id = ? ORDER BY version ASC, id ASC",
+                (row["id"],),
+            ).fetchall()
+        else:
+            hist_rows = conn.execute(
+                "SELECT * FROM memory_history WHERE namespace = ? AND topic = ? ORDER BY version ASC, id ASC",
+                (namespace, topic),
+            ).fetchall()
+
+        history = [
+            MemoryHistoryRecord(
+                id=r["id"],
+                memory_id=r["memory_id"],
+                namespace=r["namespace"],
+                kind=r["kind"],
+                topic=r["topic"],
+                content=r["content"],
+                tags=r["tags"] or "",
+                version=r["version"],
+                source=r["source"],
+                confidence=float(r["confidence"]),
+                archived_at=r["archived_at"],
+            )
+            for r in hist_rows
+        ]
+        return current, history
+
+    def hot_backup(self, dest_path: str) -> str:
+        conn = self._get_conn()
+        os.makedirs(os.path.dirname(os.path.abspath(dest_path)), exist_ok=True)
+        dest_conn = sqlite3.connect(dest_path)
+        try:
+            conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+        return dest_path
 
     def get_promotion_candidates(self, namespace: str | None, by: str, min_hits: int, limit: int) -> Sequence[MemoryRecord]:
         conn = self._get_conn()
         order_by = "m.access_count DESC, m.updated_at DESC" if by == "hits" else "m.updated_at DESC, m.access_count DESC"
-        sql = "SELECT * FROM memories m WHERE m.access_count >= ?"
+        sql = "SELECT * FROM memories m WHERE m.access_count >= ? AND m.deleted_at IS NULL"
         params: list[object] = [min_hits]
         if namespace:
             sql += " AND m.namespace = ?"
@@ -768,12 +1090,18 @@ class SqliteMemoryRepository:
 
     def link_topics(self, src_ns: str, src_topic: str, relation: str, dst_ns: str, dst_topic: str, ts: str) -> None:
         conn = self._get_conn()
-        src_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (src_ns, src_topic)).fetchone()
+        src_row = conn.execute(
+            "SELECT id FROM memories WHERE namespace = ? AND topic = ? AND deleted_at IS NULL",
+            (src_ns, src_topic),
+        ).fetchone()
         if not src_row:
-            raise ResourceNotFoundError(f"Source memory not found: [{src_ns}] topic='{src_topic}'")
-        dst_row = conn.execute("SELECT id FROM memories WHERE namespace = ? AND topic = ?", (dst_ns, dst_topic)).fetchone()
+            raise ResourceNotFoundError(f"Active source memory not found: [{src_ns}] topic='{src_topic}'")
+        dst_row = conn.execute(
+            "SELECT id FROM memories WHERE namespace = ? AND topic = ? AND deleted_at IS NULL",
+            (dst_ns, dst_topic),
+        ).fetchone()
         if not dst_row:
-            raise ResourceNotFoundError(f"Target memory not found: [{dst_ns}] topic='{dst_topic}'")
+            raise ResourceNotFoundError(f"Active target memory not found: [{dst_ns}] topic='{dst_topic}'")
 
         with immediate_transaction(conn):
             conn.execute(
@@ -861,7 +1189,7 @@ class SqliteMemoryRepository:
                 SELECT e.relation, m.namespace, m.topic
                 FROM memory_edges e
                 JOIN memories m ON e.target_id = m.id
-                WHERE e.source_id = ?
+                WHERE e.source_id = ? AND m.deleted_at IS NULL
                 ORDER BY e.relation, m.namespace, m.topic
                 """,
                 (rec.id,),
@@ -871,7 +1199,7 @@ class SqliteMemoryRepository:
                 SELECT e.relation, m.namespace, m.topic
                 FROM memory_edges e
                 JOIN memories m ON e.source_id = m.id
-                WHERE e.target_id = ?
+                WHERE e.target_id = ? AND m.deleted_at IS NULL
                 ORDER BY e.relation, m.namespace, m.topic
                 """,
                 (rec.id,),
@@ -890,18 +1218,22 @@ class SqliteMemoryRepository:
                 u_at = d.updated_at or default_ts
                 conn.execute(
                     """
-                    INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, version, source, confidence, deleted_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
                     ON CONFLICT(namespace, topic) DO UPDATE SET
                         kind = excluded.kind,
                         content = excluded.content,
                         tags = excluded.tags,
                         access_count = excluded.access_count,
                         ttl_days = excluded.ttl_days,
+                        version = excluded.version,
+                        source = excluded.source,
+                        confidence = excluded.confidence,
+                        deleted_at = NULL,
                         created_at = excluded.created_at,
                         updated_at = excluded.updated_at
                     """,
-                    (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, c_at, u_at),
+                    (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, d.version, d.source, d.confidence, c_at, u_at),
                 )
 
             for d in docs:
@@ -932,7 +1264,13 @@ class SqliteMemoryRepository:
     def compute_stats(self, stale_checker: Callable[[str, int | None], str | None]) -> StorageStats:
         conn = self._get_conn()
         ns_rows = conn.execute(
-            "SELECT namespace, COUNT(*) as cnt, SUM(access_count) as hits, SUM(LENGTH(content)) as bytes FROM memories GROUP BY namespace ORDER BY namespace"
+            """
+            SELECT namespace, COUNT(*) as cnt, SUM(access_count) as hits, SUM(LENGTH(content)) as bytes
+            FROM memories
+            WHERE deleted_at IS NULL
+            GROUP BY namespace
+            ORDER BY namespace
+            """
         ).fetchall()
         ns_stats = [
             NamespaceStat(
@@ -944,16 +1282,18 @@ class SqliteMemoryRepository:
             for r in ns_rows
         ]
 
-        monitored = conn.execute("SELECT updated_at, ttl_days FROM memories WHERE ttl_days IS NOT NULL").fetchall()
+        monitored = conn.execute("SELECT updated_at, ttl_days FROM memories WHERE ttl_days IS NOT NULL AND deleted_at IS NULL").fetchall()
         stale_cnt = sum(1 for m in monitored if stale_checker(m["updated_at"], m["ttl_days"]) is not None)
 
         pending_cnt = conn.execute("SELECT COUNT(*) FROM prospective_tasks WHERE status = 'pending'").fetchone()[0]
         total_tasks_cnt = conn.execute("SELECT COUNT(*) FROM prospective_tasks").fetchone()[0]
         edges_cnt = conn.execute("SELECT COUNT(*) FROM memory_edges").fetchone()[0]
         syn_cnt = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
+        soft_del_cnt = conn.execute("SELECT COUNT(*) FROM memories WHERE deleted_at IS NOT NULL").fetchone()[0]
+        hist_cnt = conn.execute("SELECT COUNT(*) FROM memory_history").fetchone()[0]
 
         top_rows = conn.execute(
-            "SELECT * FROM memories ORDER BY access_count DESC, updated_at DESC LIMIT 5"
+            "SELECT * FROM memories WHERE deleted_at IS NULL ORDER BY access_count DESC, updated_at DESC LIMIT 5"
         ).fetchall()
         top_records = [self._row_to_record(r) for r in top_rows]
 
@@ -965,6 +1305,8 @@ class SqliteMemoryRepository:
             total_tasks_count=total_tasks_cnt,
             edges_count=edges_cnt,
             synonyms_count=syn_cnt,
+            soft_deleted_count=soft_del_cnt,
+            history_versions_count=hist_cnt,
             top_records=top_records,
         )
 
@@ -981,63 +1323,166 @@ class MarkdownWikiAdapter:
         return candidate
 
     @staticmethod
-    def parse_frontmatter(fm_text: str) -> WikiDocument:
+    def parse_inline_array(raw: str) -> list[str]:
+        raw = raw.strip()
+        if not (raw.startswith("[") and raw.endswith("]")):
+            return []
+        s = raw[1:-1].strip()
+        if not s:
+            return []
+        items: list[str] = []
+        current: list[str] = []
+        in_quote: str | None = None
+        escaped = False
+        for ch in s:
+            if escaped:
+                current.append(ch)
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif in_quote:
+                if ch == in_quote:
+                    in_quote = None
+                else:
+                    current.append(ch)
+            elif ch in ('"', "'"):
+                in_quote = ch
+            elif ch == ",":
+                val = "".join(current).strip()
+                if val:
+                    items.append(val)
+                current = []
+            else:
+                current.append(ch)
+        val = "".join(current).strip()
+        if val:
+            items.append(val)
+        return items
+
+    @staticmethod
+    def parse_multiline_block(mode: str, lines: list[str]) -> str:
+        indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+        base_indent = min(indents) if indents else 0
+        stripped_lines = [l[base_indent:] if len(l) >= base_indent else l.lstrip() for l in lines]
+        if mode.startswith("|"):
+            return "\n".join(stripped_lines).strip()
+        elif mode.startswith(">"):
+            return " ".join(stripped_lines).strip()
+        return "\n".join(stripped_lines).strip()
+
+    @classmethod
+    def parse_frontmatter(cls, fm_text: str) -> WikiDocument:
         doc = WikiDocument(namespace="", topic="")
-        in_links = False
+        links: list[str] = []
+        in_links_list = False
+        multiline_key: str | None = None
+        multiline_mode: str | None = None
+        multiline_lines: list[str] = []
+
+        def commit_multiline() -> None:
+            nonlocal multiline_key, multiline_mode, multiline_lines
+            if multiline_key is not None and multiline_mode is not None:
+                val = cls.parse_multiline_block(multiline_mode, multiline_lines)
+                if multiline_key == "tags":
+                    doc.tags = val
+                elif multiline_key == "body" or multiline_key == "content":
+                    doc.body = val
+                multiline_key = None
+                multiline_mode = None
+                multiline_lines = []
+
         for line in fm_text.splitlines():
+            if multiline_key is not None:
+                if line.startswith((" ", "\t")) or not line.strip():
+                    multiline_lines.append(line)
+                    continue
+                else:
+                    commit_multiline()
+
+            if in_links_list:
+                stripped_line = line.strip()
+                if stripped_line.startswith("- "):
+                    link_item = stripped_line[2:].strip().strip("\"'")
+                    links.append(link_item)
+                    continue
+                elif line.startswith((" ", "\t")) and not stripped_line:
+                    continue
+                else:
+                    in_links_list = False
+
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
 
-            if in_links:
-                if stripped.startswith("- "):
-                    link_item = stripped[2:].strip().strip("\"'")
-                    doc.links.append(link_item)
-                    continue
-                elif not line.startswith((" ", "\t")):
-                    in_links = False
+            match = re.match(r"^([a-zA-Z0-9_-]+)\s*:\s*(.*)$", stripped)
+            if not match:
+                continue
 
-            if ":" in stripped:
-                key, val = stripped.split(":", 1)
-                key = key.strip()
-                val = val.strip()
+            key = match.group(1).strip()
+            val = match.group(2).strip()
 
-                if key == "links":
-                    if val == "[]":
-                        doc.links = []
-                        in_links = False
-                    else:
-                        in_links = True
-                    continue
+            if val in ("|", "|-", "|+", ">", ">-", ">+"):
+                multiline_key = key
+                multiline_mode = val
+                multiline_lines = []
+                continue
 
-                if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-                    val = val[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            if key == "links":
+                if val.startswith("[") and val.endswith("]"):
+                    links.extend(cls.parse_inline_array(val))
+                elif not val:
+                    in_links_list = True
+                continue
 
-                if key == "namespace":
-                    doc.namespace = val
-                elif key == "topic":
-                    doc.topic = val
-                elif key == "kind":
-                    doc.kind = val if val in VALID_KINDS else "fact"
-                elif key == "tags":
-                    doc.tags = val
-                elif key == "access_count":
+            if val.startswith("[") and val.endswith("]"):
+                array_items = cls.parse_inline_array(val)
+                if key == "tags":
+                    doc.tags = ", ".join(array_items)
+                continue
+
+            if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+                val = val[1:-1].replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\")
+
+            if key == "namespace":
+                doc.namespace = val
+            elif key == "topic":
+                doc.topic = val
+            elif key == "kind":
+                doc.kind = val if val in VALID_KINDS else "fact"
+            elif key == "tags":
+                doc.tags = val
+            elif key == "access_count":
+                try:
+                    doc.access_count = int(val)
+                except ValueError:
+                    doc.access_count = 0
+            elif key == "ttl_days":
+                if val.lower() in ("null", "none", "", "~"):
+                    doc.ttl_days = None
+                else:
                     try:
-                        doc.access_count = int(val)
+                        doc.ttl_days = int(val)
                     except ValueError:
-                        doc.access_count = 0
-                elif key == "ttl_days":
-                    if val.lower() in ("null", "none", "", "~"):
                         doc.ttl_days = None
-                    else:
-                        try:
-                            doc.ttl_days = int(val)
-                        except ValueError:
-                            doc.ttl_days = None
-                elif key == "created_at":
-                    doc.created_at = val
-                elif key == "updated_at":
-                    doc.updated_at = val
+            elif key == "version":
+                try:
+                    doc.version = int(val)
+                except ValueError:
+                    doc.version = 1
+            elif key == "source":
+                doc.source = val
+            elif key == "confidence":
+                try:
+                    doc.confidence = float(val)
+                except ValueError:
+                    doc.confidence = 1.0
+            elif key == "created_at":
+                doc.created_at = val
+            elif key == "updated_at":
+                doc.updated_at = val
+
+        commit_multiline()
+        doc.links = links
         return doc
 
     @classmethod
@@ -1075,12 +1520,16 @@ class MarkdownWikiAdapter:
             clean_tags = rec.tags.replace("\\", "\\\\").replace('"', '\\"')
             clean_topic = rec.topic.replace("\\", "\\\\").replace('"', '\\"')
             clean_ns = rec.namespace.replace("\\", "\\\\").replace('"', '\\"')
+            clean_source = rec.source.replace("\\", "\\\\").replace('"', '\\"')
 
             frontmatter = (
                 f"---\n"
                 f'namespace: "{clean_ns}"\n'
                 f'topic: "{clean_topic}"\n'
                 f'kind: "{rec.kind}"\n'
+                f"version: {rec.version}\n"
+                f'source: "{clean_source}"\n'
+                f"confidence: {rec.confidence}\n"
                 f'tags: "{clean_tags}"\n'
                 f"access_count: {rec.access_count}\n"
                 f"ttl_days: {ttl_yaml}\n"
@@ -1334,11 +1783,22 @@ class MemoryEngineController:
     def cmd_upsert(self, args: argparse.Namespace) -> None:
         DomainPolicy.validate_namespace(args.namespace)
         DomainPolicy.validate_kind(args.kind)
+        DomainPolicy.validate_confidence(args.confidence)
         ttl_days, _ = DomainPolicy.parse_ttl(args.ttl, args.kind, is_verify=False)
         ts = self._clock.now_iso()
-        self._repo.upsert(args.namespace, args.kind, args.topic, args.content, args.tags or "", ttl_days, ts)
+        self._repo.upsert(
+            namespace=args.namespace,
+            kind=args.kind,
+            topic=args.topic,
+            content=args.content,
+            tags=args.tags or "",
+            ttl_days=ttl_days,
+            ts=ts,
+            source=args.source,
+            confidence=args.confidence,
+        )
         ttl_msg = f" (ttl={ttl_days}d)" if ttl_days is not None else ""
-        print(f"[OK] Upserted [{args.namespace}/{args.kind}] topic='{args.topic}'{ttl_msg} at {ts}")
+        print(f"[OK] Upserted [{args.namespace}/{args.kind}] topic='{args.topic}'{ttl_msg} [source={args.source}, conf={args.confidence}] at {ts}")
 
     def cmd_verify(self, args: argparse.Namespace) -> None:
         DomainPolicy.validate_namespace(args.namespace)
@@ -1361,6 +1821,36 @@ class MemoryEngineController:
 
         records = self._repo.search_fts(fts_query, args.ns, args.limit, prioritize_episodic=False)
 
+        if getattr(args, "json", False):
+            payload = {
+                "query": args.query,
+                "namespace": args.ns,
+                "synonyms_expanded": syns,
+                "count": len(records),
+                "records": [
+                    {
+                        "id": r.id,
+                        "namespace": r.namespace,
+                        "kind": r.kind,
+                        "topic": r.topic,
+                        "content": r.content,
+                        "tags": r.tags,
+                        "access_count": r.access_count,
+                        "ttl_days": r.ttl_days,
+                        "version": r.version,
+                        "source": r.source,
+                        "confidence": r.confidence,
+                        "created_at": r.created_at,
+                        "updated_at": r.updated_at,
+                        "score": round(r.score, 4),
+                        "stale_warning": DomainPolicy.check_stale(r.updated_at, r.ttl_days, self._clock),
+                    }
+                    for r in records
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
         if args.ns:
             self._print_prospective_alerts([args.ns])
         else:
@@ -1381,7 +1871,8 @@ class MemoryEngineController:
 
         for r in records:
             ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
-            print(f"=== [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
+            meta_part = f"v{r.version} | conf={r.confidence} | source={r.source}"
+            print(f"=== [{r.namespace}/{r.kind}] {r.topic} ({meta_part} | tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
             stale_warn = DomainPolicy.check_stale(r.updated_at, r.ttl_days, self._clock)
             if stale_warn:
                 print(stale_warn)
@@ -1390,10 +1881,41 @@ class MemoryEngineController:
 
     def cmd_get(self, args: argparse.Namespace) -> None:
         DomainPolicy.validate_namespace(args.namespace)
-        self._print_prospective_alerts([args.namespace])
         rec, edges = self._repo.get_by_topic(args.namespace, args.topic, increment_hit=True)
+
+        if getattr(args, "json", False):
+            payload = {
+                "id": rec.id,
+                "namespace": rec.namespace,
+                "kind": rec.kind,
+                "topic": rec.topic,
+                "content": rec.content,
+                "tags": rec.tags,
+                "access_count": rec.access_count,
+                "ttl_days": rec.ttl_days,
+                "version": rec.version,
+                "source": rec.source,
+                "confidence": rec.confidence,
+                "created_at": rec.created_at,
+                "updated_at": rec.updated_at,
+                "stale_warning": DomainPolicy.check_stale(rec.updated_at, rec.ttl_days, self._clock),
+                "links": [
+                    {
+                        "relation": e.relation,
+                        "namespace": e.namespace,
+                        "topic": e.topic,
+                        "direction": e.direction,
+                    }
+                    for e in edges
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        self._print_prospective_alerts([args.namespace])
         ttl_part = f" | ttl={rec.ttl_days}d" if rec.ttl_days is not None else ""
-        print(f"=== [{rec.namespace}/{rec.kind}] {rec.topic} (tags: {rec.tags or '-'} | updated: {rec.updated_at}{ttl_part} | hits: {rec.access_count}) ===")
+        meta_part = f"v{rec.version} | conf={rec.confidence} | source={rec.source}"
+        print(f"=== [{rec.namespace}/{rec.kind}] {rec.topic} ({meta_part} | tags: {rec.tags or '-'} | updated: {rec.updated_at}{ttl_part} | hits: {rec.access_count}) ===")
         stale_warn = DomainPolicy.check_stale(rec.updated_at, rec.ttl_days, self._clock)
         if stale_warn:
             print(stale_warn)
@@ -1412,20 +1934,135 @@ class MemoryEngineController:
         if args.ns:
             DomainPolicy.validate_namespace(args.ns)
         records = self._repo.list_records(args.ns)
+
+        if getattr(args, "json", False):
+            payload = [
+                {
+                    "id": r.id,
+                    "namespace": r.namespace,
+                    "kind": r.kind,
+                    "topic": r.topic,
+                    "content": r.content,
+                    "tags": r.tags,
+                    "access_count": r.access_count,
+                    "ttl_days": r.ttl_days,
+                    "version": r.version,
+                    "source": r.source,
+                    "confidence": r.confidence,
+                    "created_at": r.created_at,
+                    "updated_at": r.updated_at,
+                }
+                for r in records
+            ]
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
         if not records:
-            print("(Archival memory is empty)" if not args.ns else f"(No memories in namespace '{args.ns}')")
+            print("(Archival memory is empty)" if not args.ns else f"(No active memories in namespace '{args.ns}')")
             return
         for r in records:
             ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
-            print(f"- [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'}{ttl_part}) | updated: {r.updated_at} | hits: {r.access_count}")
+            meta_part = f"v{r.version} | conf={r.confidence}"
+            print(f"- [{r.namespace}/{r.kind}] {r.topic} ({meta_part} | tags: {r.tags or '-'}{ttl_part}) | updated: {r.updated_at} | hits: {r.access_count}")
 
     def cmd_delete(self, args: argparse.Namespace) -> None:
         DomainPolicy.validate_namespace(args.namespace)
-        deleted = self._repo.delete_record(args.namespace, args.topic)
+        ts = self._clock.now_iso()
+        deleted = self._repo.delete_record(args.namespace, args.topic, hard=args.hard, ts=ts)
         if deleted:
-            print(f"[OK] Deleted [{args.namespace}] topic='{args.topic}'")
+            mode = "Permanently deleted" if args.hard else "Soft-deleted"
+            print(f"[OK] {mode} [{args.namespace}] topic='{args.topic}'")
         else:
-            print(f"[WARN] Topic not found: [{args.namespace}] topic='{args.topic}'")
+            print(f"[WARN] Topic not found or already soft-deleted: [{args.namespace}] topic='{args.topic}'")
+
+    def cmd_restore(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        ts = self._clock.now_iso()
+        restored = self._repo.restore_record(args.namespace, args.topic, ts=ts)
+        if restored:
+            print(f"[OK] Restored soft-deleted memory [{args.namespace}] topic='{args.topic}'")
+        else:
+            print(f"[WARN] No soft-deleted memory found for [{args.namespace}] topic='{args.topic}'")
+
+    def cmd_history(self, args: argparse.Namespace) -> None:
+        DomainPolicy.validate_namespace(args.namespace)
+        current, history = self._repo.get_history(args.namespace, args.topic)
+        if current is None and not history:
+            raise ResourceNotFoundError(f"No active or historical memory found for [{args.namespace}] topic='{args.topic}'")
+
+        if getattr(args, "json", False):
+            payload = {
+                "namespace": args.namespace,
+                "topic": args.topic,
+                "current": (
+                    {
+                        "id": current.id,
+                        "namespace": current.namespace,
+                        "kind": current.kind,
+                        "topic": current.topic,
+                        "content": current.content,
+                        "tags": current.tags,
+                        "version": current.version,
+                        "source": current.source,
+                        "confidence": current.confidence,
+                        "deleted_at": current.deleted_at,
+                        "created_at": current.created_at,
+                        "updated_at": current.updated_at,
+                        "is_deleted": current.deleted_at is not None,
+                    }
+                    if current
+                    else None
+                ),
+                "history_count": len(history),
+                "history": [
+                    {
+                        "id": h.id,
+                        "memory_id": h.memory_id,
+                        "namespace": h.namespace,
+                        "kind": h.kind,
+                        "topic": h.topic,
+                        "content": h.content,
+                        "tags": h.tags,
+                        "version": h.version,
+                        "source": h.source,
+                        "confidence": h.confidence,
+                        "archived_at": h.archived_at,
+                    }
+                    for h in history
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        print(f"=== Memory Version History: [{args.namespace}] {args.topic} ===")
+        if current:
+            del_marker = f" [SOFT-DELETED at {current.deleted_at}]" if current.deleted_at else " [ACTIVE]"
+            print(f"Current State: v{current.version} ({current.kind}){del_marker} | source={current.source} | conf={current.confidence} | updated: {current.updated_at}")
+        else:
+            print("Current State: (Record permanently deleted)")
+
+        if history:
+            print(f"\nArchived History Versions ({len(history)}):")
+            for idx, h in enumerate(history, 1):
+                summ = DomainPolicy.make_summary(h.content, h.tags)
+                print(f"  {idx}. v{h.version} [{h.kind}] (source={h.source}, conf={h.confidence}) archived at {h.archived_at}")
+                print(f"     tags: {h.tags or '-'} | summary: {summ}")
+        else:
+            print("\nNo previous archived versions recorded.")
+
+    def cmd_backup(self, args: argparse.Namespace) -> None:
+        if args.dest_path:
+            dest_path = os.path.abspath(args.dest_path)
+        else:
+            ts_slug = self._clock.now_iso().replace("-", "").replace(":", "")
+            dest_dir = os.path.join(self._mem_dir, "backups")
+            dest_path = os.path.join(dest_dir, f"archival_{ts_slug}.db")
+
+        saved_path = self._repo.hot_backup(dest_path)
+        if getattr(args, "json", False):
+            print(json.dumps({"status": "success", "backup_path": saved_path}, indent=2, ensure_ascii=False))
+        else:
+            print(f"[OK] Hot backup created successfully at {saved_path}")
 
     def cmd_promote(self, args: argparse.Namespace) -> None:
         if args.ns:
@@ -1438,7 +2075,7 @@ class MemoryEngineController:
         print(f"=== Archival Memory Promotion Candidates (Sorted by {args.by}, limit={args.limit}) ===")
         for idx, r in enumerate(records, 1):
             ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
-            print(f"{idx}. [{r.namespace}/{r.kind}] '{r.topic}' (hits: {r.access_count}{ttl_part} | updated: {r.updated_at})")
+            print(f"{idx}. [{r.namespace}/{r.kind}] '{r.topic}' (v{r.version} | hits: {r.access_count}{ttl_part} | updated: {r.updated_at})")
         print()
 
         grouped: dict[str, list[tuple[str, str]]] = {}
@@ -1477,6 +2114,22 @@ class MemoryEngineController:
             tasks = self._repo.list_due_tasks([args.ns])
         else:
             tasks = self._repo.list_due_tasks(None)
+
+        if getattr(args, "json", False):
+            payload = [
+                {
+                    "id": r.id,
+                    "namespace": r.namespace,
+                    "trigger_cond": r.trigger_cond,
+                    "action": r.action,
+                    "status": r.status,
+                    "created_at": r.created_at,
+                    "completed_at": r.completed_at,
+                }
+                for r in tasks
+            ]
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
 
         if not tasks:
             print("(No pending prospective tasks)" if not args.ns else f"(No pending prospective tasks in namespace '{args.ns}')")
@@ -1522,6 +2175,34 @@ class MemoryEngineController:
             raise DomainValidationError("No searchable keywords (length >= 3) found in error snippet")
 
         records = self._repo.search_fts(fts_query, args.ns, args.limit, prioritize_episodic=True)
+
+        if getattr(args, "json", False):
+            payload = {
+                "matched_keywords": words[:10],
+                "count": len(records),
+                "records": [
+                    {
+                        "id": r.id,
+                        "namespace": r.namespace,
+                        "kind": r.kind,
+                        "topic": r.topic,
+                        "content": r.content,
+                        "tags": r.tags,
+                        "access_count": r.access_count,
+                        "ttl_days": r.ttl_days,
+                        "version": r.version,
+                        "source": r.source,
+                        "confidence": r.confidence,
+                        "created_at": r.created_at,
+                        "updated_at": r.updated_at,
+                        "score": round(r.score, 4),
+                    }
+                    for r in records
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
         if not records:
             print(f"No error solutions found matching query keywords: {', '.join(words[:10])}")
             return
@@ -1529,29 +2210,67 @@ class MemoryEngineController:
         print(f"=== Episodic Error Recall (Matched {len(records)} record(s)) ===")
         for r in records:
             ttl_part = f" | ttl={r.ttl_days}d" if r.ttl_days is not None else ""
-            print(f"\n=== [{r.namespace}/{r.kind}] {r.topic} (tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
+            meta_part = f"v{r.version} | conf={r.confidence} | source={r.source}"
+            print(f"\n=== [{r.namespace}/{r.kind}] {r.topic} ({meta_part} | tags: {r.tags or '-'} | updated: {r.updated_at}{ttl_part} | hits: {r.access_count}) ===")
             stale_warn = DomainPolicy.check_stale(r.updated_at, r.ttl_days, self._clock)
             if stale_warn:
                 print(stale_warn)
             print(r.content)
 
-    def cmd_check_core(self, _args: argparse.Namespace) -> None:
+    def cmd_check_core(self, args: argparse.Namespace) -> None:
+        max_lines = args.max_lines if getattr(args, "max_lines", None) is not None else DomainPolicy.get_core_max_lines()
+
         with file_lock(self._lock_path):
             if not os.path.exists(self._core_path):
                 raise ResourceNotFoundError(f"CORE.md not found at {self._core_path}")
             with open(self._core_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
+                content = f.read()
 
+        lines = content.splitlines()
         line_count = len(lines)
-        exceeded = line_count > CORE_MAX_LINES
+        word_count = len(content.split())
+        byte_count = len(content.encode("utf-8"))
+        char_count = len(content)
+        estimated_tokens = int(word_count * 1.33)
+
+        exceeded = line_count > max_lines
         status = "EXCEEDED" if exceeded else "OK"
-        remaining = CORE_MAX_LINES - line_count
+        remaining = max_lines - line_count
+        due_tasks = self._repo.list_due_tasks(None)
+
+        if getattr(args, "json", False):
+            payload = {
+                "status": status,
+                "line_count": line_count,
+                "max_lines": max_lines,
+                "remaining_lines": remaining,
+                "word_count": word_count,
+                "byte_count": byte_count,
+                "char_count": char_count,
+                "estimated_tokens": estimated_tokens,
+                "exceeded": exceeded,
+                "path": self._core_path,
+                "pending_tasks": [
+                    {
+                        "id": t.id,
+                        "namespace": t.namespace,
+                        "trigger_cond": t.trigger_cond,
+                        "action": t.action,
+                        "created_at": t.created_at,
+                    }
+                    for t in due_tasks
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            if exceeded:
+                sys.exit(1)
+            return
 
         print("=== CORE.md Working Memory Budget ===")
-        print(f"Status: {status} ({line_count}/{CORE_MAX_LINES} lines used, {remaining} lines remaining)")
+        print(f"Status: {status} ({line_count}/{max_lines} lines used, {remaining} lines remaining)")
+        print(f"Density: {word_count} words | {byte_count} bytes | ~{estimated_tokens} estimated tokens")
         print(f"Path: {self._core_path}")
 
-        due_tasks = self._repo.list_due_tasks(None)
         print("\n=== Pending Prospective Tasks ===")
         if not due_tasks:
             print("(No pending prospective tasks)")
@@ -1568,7 +2287,7 @@ class MemoryEngineController:
         wiki_dir = args.dir if args.dir else os.path.join(self._mem_dir, "wiki")
         items = self._repo.get_all_for_export(args.ns)
         if not items:
-            print("No memories to export." if not args.ns else f"No memories to export in namespace '{args.ns}'.")
+            print("No active memories to export." if not args.ns else f"No active memories to export in namespace '{args.ns}'.")
             return
         count, index_path = MarkdownWikiAdapter.export_wiki(
             wiki_dir=wiki_dir,
@@ -1576,7 +2295,7 @@ class MemoryEngineController:
             is_full_export=(args.ns is None),
             now_iso=self._clock.now_iso(),
         )
-        print(f"[OK] Exported {count} memories to {wiki_dir}")
+        print(f"[OK] Exported {count} active memories to {wiki_dir}")
         print(f"[OK] Generated index at {index_path}")
 
     def cmd_import_md(self, args: argparse.Namespace) -> None:
@@ -1591,27 +2310,76 @@ class MemoryEngineController:
         print(f"[OK] Imported {imported_cnt} memories from {wiki_dir}")
         print(f"[OK] Restored {links_cnt} semantic links into memory_edges")
 
-    def cmd_stats(self, _args: argparse.Namespace) -> None:
+    def cmd_stats(self, args: argparse.Namespace) -> None:
         stats = self._repo.compute_stats(lambda u, t: DomainPolicy.check_stale(u, t, self._clock))
-        print("=== Archival Memory Statistics (SQLite + FTS5) ===")
+
+        if getattr(args, "json", False):
+            payload = {
+                "namespaces": [
+                    {
+                        "namespace": ns.namespace,
+                        "count": ns.count,
+                        "hits": ns.hits,
+                        "bytes": ns.total_bytes,
+                    }
+                    for ns in stats.namespaces
+                ],
+                "freshness": {
+                    "stale_count": stats.stale_count,
+                    "ttl_monitored_count": stats.ttl_monitored_count,
+                },
+                "prospective_tasks": {
+                    "pending_count": stats.pending_tasks_count,
+                    "total_count": stats.total_tasks_count,
+                },
+                "semantic_edges_count": stats.edges_count,
+                "synonyms_count": stats.synonyms_count,
+                "soft_deleted_count": stats.soft_deleted_count,
+                "history_versions_count": stats.history_versions_count,
+                "top_records": [
+                    {
+                        "id": t.id,
+                        "namespace": t.namespace,
+                        "kind": t.kind,
+                        "topic": t.topic,
+                        "access_count": t.access_count,
+                        "version": t.version,
+                        "ttl_days": t.ttl_days,
+                        "updated_at": t.updated_at,
+                    }
+                    for t in stats.top_records
+                ],
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+
+        print("=== Archival Memory Statistics (SQLite WAL + FTS5 + Schema v3) ===")
         for ns in stats.namespaces:
-            print(f"- namespace='{ns.namespace}': {ns.count} records | {ns.hits} total hits | {ns.total_bytes} bytes")
+            print(f"- namespace='{ns.namespace}': {ns.count} active records | {ns.hits} total hits | {ns.total_bytes} bytes")
 
         print(f"\nFreshness / TTL: {stats.stale_count} stale / {stats.ttl_monitored_count} monitored with TTL")
         print(f"Prospective Tasks: {stats.pending_tasks_count} pending / {stats.total_tasks_count} total")
         print(f"Semantic Edges: {stats.edges_count} total connections")
         print(f"Dynamic Synonyms: {stats.synonyms_count} mapped terms")
+        print(f"Soft-deleted Records: {stats.soft_deleted_count} archived")
+        print(f"Historical Versions: {stats.history_versions_count} recorded in memory_history")
 
         if stats.top_records:
             print("\nTop Accessed Records (Promotion Candidates for CORE.md):")
             for t in stats.top_records:
                 ttl_part = f" | ttl={t.ttl_days}d" if t.ttl_days is not None else ""
-                print(f"  * [{t.namespace}] {t.topic} ({t.access_count} hits{ttl_part})")
+                print(f"  * [{t.namespace}] {t.topic} (v{t.version} | {t.access_count} hits{ttl_part})")
         print("\nTip: Run 'mem promote' to generate ready-to-use markdown for CORE.md Semantic Directory.")
 
 
 def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Antigravity Tier-2 Archival Memory CLI")
+    json_parent = argparse.ArgumentParser(add_help=False)
+    json_parent.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output results in JSON format")
+
+    parser = argparse.ArgumentParser(
+        description="Antigravity Tier-2 Archival Memory CLI",
+        parents=[json_parent],
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="Initialize memory database, seed foundational records, and create CORE.md")
@@ -1621,13 +2389,13 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_init.add_argument("--force", action="store_true", help="Force overwrite existing CORE.md from template")
     p_init.set_defaults(func=controller.cmd_init)
 
-    p_search = sub.add_parser("search", help="Search archival memories via FTS5 BM25 with synonym expansion")
+    p_search = sub.add_parser("search", parents=[json_parent], help="Search archival memories via FTS5 BM25 with synonym expansion")
     p_search.add_argument("query", help="Search terms or phrases")
     p_search.add_argument("--ns", default=None, help="Filter by namespace")
     p_search.add_argument("--limit", type=int, default=5, help="Result limit (default: 5)")
     p_search.set_defaults(func=controller.cmd_search)
 
-    p_get = sub.add_parser("get", help="Get exact memory record by namespace and topic")
+    p_get = sub.add_parser("get", parents=[json_parent], help="Get exact memory record by namespace and topic")
     p_get.add_argument("namespace", help="Namespace")
     p_get.add_argument("topic", help="Topic name")
     p_get.set_defaults(func=controller.cmd_get)
@@ -1639,6 +2407,8 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_upsert.add_argument("content", help="Content payload")
     p_upsert.add_argument("tags", nargs="?", default="", help="Comma-separated tags")
     p_upsert.add_argument("--ttl", default=None, help="TTL in days (int, or '0'/'none' for infinite)")
+    p_upsert.add_argument("--source", default="manual", help="Provenance source identifier (default: 'manual')")
+    p_upsert.add_argument("--confidence", type=float, default=1.0, help="Confidence factor 0.0 to 1.0 (default: 1.0)")
     p_upsert.set_defaults(func=controller.cmd_upsert)
 
     p_verify = sub.add_parser("verify", help="Verify freshness of a memory record and update its timestamp/TTL")
@@ -1647,14 +2417,29 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_verify.add_argument("--ttl", default=None, help="Update TTL in days (int, or '0'/'none' for infinite)")
     p_verify.set_defaults(func=controller.cmd_verify)
 
-    p_list = sub.add_parser("list", help="List memory records")
+    p_list = sub.add_parser("list", parents=[json_parent], help="List memory records")
     p_list.add_argument("--ns", default=None, help="Filter by namespace")
     p_list.set_defaults(func=controller.cmd_list)
 
-    p_del = sub.add_parser("delete", help="Delete a memory record")
+    p_del = sub.add_parser("delete", help="Delete a memory record (soft-delete by default, or physical with --hard)")
     p_del.add_argument("namespace", help="Namespace")
     p_del.add_argument("topic", help="Topic name")
+    p_del.add_argument("--hard", action="store_true", help="Execute permanent physical deletion instead of soft-delete")
     p_del.set_defaults(func=controller.cmd_delete)
+
+    p_restore = sub.add_parser("restore", help="Restore a soft-deleted memory record")
+    p_restore.add_argument("namespace", help="Namespace")
+    p_restore.add_argument("topic", help="Topic name")
+    p_restore.set_defaults(func=controller.cmd_restore)
+
+    p_history = sub.add_parser("history", parents=[json_parent], help="View version history and provenance of a memory topic")
+    p_history.add_argument("namespace", help="Namespace")
+    p_history.add_argument("topic", help="Topic name")
+    p_history.set_defaults(func=controller.cmd_history)
+
+    p_backup = sub.add_parser("backup", parents=[json_parent], help="Create a hot backup of archival.db using sqlite3 native backup")
+    p_backup.add_argument("dest_path", nargs="?", default=None, help="Optional backup file destination")
+    p_backup.set_defaults(func=controller.cmd_backup)
 
     p_promote = sub.add_parser("promote", help="Promote high-traffic or recent L2 topics to CORE.md Semantic Directory")
     p_promote.add_argument("--ns", default=None, help="Filter by namespace")
@@ -1663,7 +2448,7 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_promote.add_argument("--min-hits", type=int, default=0, help="Minimum access_count filter")
     p_promote.set_defaults(func=controller.cmd_promote)
 
-    p_stats = sub.add_parser("stats", aliases=["status"], help="Show storage and hit statistics")
+    p_stats = sub.add_parser("stats", aliases=["status"], parents=[json_parent], help="Show storage and hit statistics")
     p_stats.set_defaults(func=controller.cmd_stats)
 
     p_link = sub.add_parser("link", help="Link two memories with a semantic relation")
@@ -1678,7 +2463,7 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_defer.add_argument("action", help="Action to take when triggered")
     p_defer.set_defaults(func=controller.cmd_defer)
 
-    p_due = sub.add_parser("due", help="List pending prospective tasks")
+    p_due = sub.add_parser("due", parents=[json_parent], help="List pending prospective tasks")
     p_due.add_argument("--ns", default=None, help="Filter by namespace")
     p_due.set_defaults(func=controller.cmd_due)
 
@@ -1692,13 +2477,14 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_syn.add_argument("synonyms", nargs="?", default=None, help="Comma-separated synonyms")
     p_syn.set_defaults(func=controller.cmd_syn)
 
-    p_recall = sub.add_parser("recall-error", help="Recall episodic error solutions matching an error snippet")
+    p_recall = sub.add_parser("recall-error", parents=[json_parent], help="Recall episodic error solutions matching an error snippet")
     p_recall.add_argument("error_snippet", help="Error message, stacktrace or snippet")
     p_recall.add_argument("--ns", default=None, help="Filter by namespace")
     p_recall.add_argument("--limit", type=int, default=5, help="Result limit (default: 5)")
     p_recall.set_defaults(func=controller.cmd_recall_error)
 
-    p_check = sub.add_parser("check-core", help="Check CORE.md line count budget and pending prospective tasks")
+    p_check = sub.add_parser("check-core", parents=[json_parent], help="Check CORE.md line count budget, density and pending prospective tasks")
+    p_check.add_argument("--max-lines", type=int, default=None, help=f"Custom line budget (default: {DEFAULT_CORE_MAX_LINES} or $ANTIGRAVITY_CORE_MAX_LINES)")
     p_check.set_defaults(func=controller.cmd_check_core)
 
     p_export_md = sub.add_parser("export-md", help="Export archival memories to Markdown Wiki with YAML frontmatter")
@@ -1731,11 +2517,16 @@ def main() -> None:
     )
 
     parser = build_parser(controller)
-    args = parser.parse_args()
     try:
+        args = parser.parse_args()
         args.func(args)
-    except (DomainValidationError, ResourceNotFoundError) as exc:
-        sys.exit(f"Error: {exc}")
+    except (DomainValidationError, ResourceNotFoundError, sqlite3.Error, OSError) as exc:
+        is_json = "--json" in sys.argv
+        if is_json:
+            sys.stderr.write(json.dumps({"status": "error", "error": str(exc)}, ensure_ascii=False) + "\n")
+        else:
+            sys.stderr.write(f"Error: {exc}\n")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
