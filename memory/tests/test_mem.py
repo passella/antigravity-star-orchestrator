@@ -92,6 +92,19 @@ class TestDomainPolicy(unittest.TestCase):
         self.assertIn('"containers"', query)
         self.assertIn("container", expanded)
 
+    def test_fts_query_token_length_filter(self):
+        # Unquoted single character tokens are ignored (MIN_TOKEN_LENGTH = 2)
+        query_all_short, _ = DomainPolicy.build_fts_query("a b c", {})
+        self.assertEqual(query_all_short, "")
+
+        # Valid tokens with at least 2 chars are preserved
+        query_mixed, _ = DomainPolicy.build_fts_query("ab c", {})
+        self.assertEqual(query_mixed, '"ab"*')
+
+        # Quoted single character tokens are preserved
+        query_quoted, _ = DomainPolicy.build_fts_query('"a" b', {})
+        self.assertEqual(query_quoted, '"a"')
+
     def test_error_fts_query(self):
         snippet = "NullPointerException in MemoryEngineController.java line 42"
         query, keywords = DomainPolicy.build_error_fts_query(snippet)
@@ -237,8 +250,189 @@ class TestSqliteRepositorySchemaV3(unittest.TestCase):
             records = v2_repo.search_fts("Content preserved", None, 5)
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].topic, "v2-record")
+            v2_repo.close()
         finally:
             shutil.rmtree(v2_dir, ignore_errors=True)
+
+    def test_migration_from_schema_v1_to_v3(self):
+        v1_dir = tempfile.mkdtemp()
+        v1_path = os.path.join(v1_dir, "v1.db")
+        try:
+            conn = sqlite3.connect(v1_path)
+            conn.executescript("""
+                CREATE TABLE memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    namespace TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN ('fact', 'learning', 'behavior', 'decision', 'invariant')),
+                    topic TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    tags TEXT DEFAULT '',
+                    access_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(namespace, topic)
+                );
+                CREATE VIRTUAL TABLE memories_fts USING fts5(
+                    topic, content, tags, namespace,
+                    content='memories', content_rowid='id'
+                );
+                CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
+                    VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
+                END;
+                INSERT INTO memories (namespace, kind, topic, content, created_at, updated_at)
+                VALUES ('default', 'fact', 'v1-fact', 'Legacy v1 fact content', '2026-01-01', '2026-01-01');
+                PRAGMA user_version = 1;
+            """)
+            conn.close()
+
+            # Migrate directly from v1 to v3
+            v1_repo = SqliteMemoryRepository(v1_path)
+            v1_conn = v1_repo._get_conn()
+            self.assertEqual(v1_conn.execute("PRAGMA user_version;").fetchone()[0], 3)
+
+            # Preserved data
+            row = v1_conn.execute("SELECT * FROM memories WHERE topic = 'v1-fact'").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["version"], 1)
+            self.assertEqual(row["source"], "manual")
+            self.assertEqual(float(row["confidence"]), 1.0)
+            self.assertIsNone(row["deleted_at"])
+
+            # Verify playbook kind is now fully supported without constraint error
+            v1_repo.upsert(
+                namespace="default",
+                kind="playbook",
+                topic="v3-playbook",
+                content="Playbook recipe supported after v3 upgrade",
+                tags="recipe",
+                ttl_days=None,
+                ts="2026-11-01T12:00:00Z",
+            )
+            playbook_row = v1_conn.execute("SELECT * FROM memories WHERE topic = 'v3-playbook'").fetchone()
+            self.assertIsNotNone(playbook_row)
+            self.assertEqual(playbook_row["kind"], "playbook")
+
+            # Check schema_migrations has all 3 versions logged
+            migrations = v1_conn.execute("SELECT version FROM schema_migrations ORDER BY version").fetchall()
+            self.assertEqual([m["version"] for m in migrations], [1, 2, 3])
+            v1_repo.close()
+        finally:
+            shutil.rmtree(v1_dir, ignore_errors=True)
+
+    def test_upsert_over_soft_deleted_record_fts_consistency(self):
+        # Validação completa das 5 transições da máquina de estados do FTS5 (external content)
+        ts = self.clock.now_iso()
+
+        # Transição 1: Criação (None -> Ativo via INSERT / memories_ai)
+        self.repo.upsert(
+            namespace="default",
+            kind="fact",
+            topic="reactivation-topic",
+            content="AlphaInitialSearchableContent",
+            tags="tagA",
+            ttl_days=None,
+            ts=ts,
+        )
+        self.assertEqual(len(self.repo.search_fts("AlphaInitialSearchableContent", "default", 5)), 1)
+
+        # Transição 2: Ativo -> Ativo com troca de conteúdo (memories_au: DELETE old + INSERT new)
+        ts_update = self.clock.now_iso()
+        self.repo.upsert(
+            namespace="default",
+            kind="fact",
+            topic="reactivation-topic",
+            content="GammaUpdatedActiveSearchableContent",
+            tags="tagA2",
+            ttl_days=None,
+            ts=ts_update,
+        )
+        # Termo antigo deve desaparecer do FTS5 e novo termo deve ser indexado
+        self.assertEqual(len(self.repo.search_fts("AlphaInitialSearchableContent", "default", 5)), 0)
+        self.assertEqual(len(self.repo.search_fts("GammaUpdatedActiveSearchableContent", "default", 5)), 1)
+
+        # Transição 3: Ativo -> Soft-deleted (memories_au: DELETE old WHERE old.deleted_at IS NULL)
+        self.assertTrue(self.repo.delete_record("default", "reactivation-topic", hard=False, ts=self.clock.now_iso()))
+        self.assertEqual(len(self.repo.search_fts("GammaUpdatedActiveSearchableContent", "default", 5)), 0)
+        self.assertEqual(len(self.repo.search_fts("AlphaInitialSearchableContent", "default", 5)), 0)
+
+        # Transição 4: Soft-deleted -> Soft-deleted (memories_au: NO-OP, old e new deleted_at NOT NULL)
+        conn = self.repo._get_conn()
+        conn.execute("UPDATE memories SET tags = 'ArchivedSoftDeletedTag' WHERE topic = 'reactivation-topic'")
+        self.assertEqual(len(self.repo.search_fts("GammaUpdatedActiveSearchableContent", "default", 5)), 0)
+        self.assertEqual(len(self.repo.search_fts("ArchivedSoftDeletedTag", "default", 5)), 0)
+
+        # Transição 5: Soft-deleted -> Ativo (memories_au: sem DELETE pois old.deleted_at NOT NULL; INSERT new)
+        ts2 = self.clock.now_iso()
+        self.repo.upsert(
+            namespace="default",
+            kind="learning",
+            topic="reactivation-topic",
+            content="BetaReactivatedSearchableContent",
+            tags="tagB",
+            ttl_days=None,
+            ts=ts2,
+            source="agent-default",
+            confidence=0.9,
+        )
+
+        # Termos anteriores devem continuar ausentes; novo termo deve ser encontrado exatamente uma vez
+        self.assertEqual(len(self.repo.search_fts("AlphaInitialSearchableContent", "default", 5)), 0)
+        self.assertEqual(len(self.repo.search_fts("GammaUpdatedActiveSearchableContent", "default", 5)), 0)
+        found_new = self.repo.search_fts("BetaReactivatedSearchableContent", "default", 5)
+        self.assertEqual(len(found_new), 1)
+        self.assertEqual(found_new[0].topic, "reactivation-topic")
+        self.assertEqual(found_new[0].version, 3)
+
+        # Validação estrutural do FTS5 (sem duplicatas e B-tree íntegra)
+        matched_rows = conn.execute("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'BetaReactivatedSearchableContent'").fetchall()
+        self.assertEqual(len(matched_rows), 1)
+
+    def test_bulk_import_preserves_history(self):
+        doc1 = mem_engine.WikiDocument(
+            namespace="default",
+            topic="imported-wiki-doc",
+            kind="fact",
+            tags="wiki,v1",
+            access_count=2,
+            ttl_days=30,
+            version=1,
+            source="wiki",
+            confidence=0.8,
+            body="First revision imported from markdown",
+        )
+        imported_cnt, _ = self.repo.bulk_import([doc1], "2026-11-01T10:00:00Z")
+        self.assertEqual(imported_cnt, 1)
+
+        rec1, hist1 = self.repo.get_history("default", "imported-wiki-doc")
+        self.assertIsNotNone(rec1)
+        self.assertEqual(rec1.version, 1)
+        self.assertEqual(rec1.content, "First revision imported from markdown")
+        self.assertEqual(len(hist1), 0)
+
+        # Import second revision with updated body
+        doc2 = mem_engine.WikiDocument(
+            namespace="default",
+            topic="imported-wiki-doc",
+            kind="fact",
+            tags="wiki,v2",
+            access_count=5,
+            ttl_days=30,
+            version=1,  # even if markdown specifies version 1, repository must increment
+            source="wiki-editor",
+            confidence=0.9,
+            body="Second revision imported from markdown",
+        )
+        self.repo.bulk_import([doc2], "2026-11-01T11:00:00Z")
+
+        rec2, hist2 = self.repo.get_history("default", "imported-wiki-doc")
+        self.assertEqual(rec2.version, 2)
+        self.assertEqual(rec2.content, "Second revision imported from markdown")
+        self.assertEqual(rec2.source, "wiki-editor")
+        self.assertEqual(rec2.confidence, 0.9)
+        self.assertEqual(len(hist2), 1)
+        self.assertEqual(hist2[0].version, 1)
+        self.assertEqual(hist2[0].content, "First revision imported from markdown")
 
     def test_upsert_versioning_and_history(self):
         ts = self.clock.now_iso()
@@ -494,6 +688,37 @@ class TestControllerAndCliJson(unittest.TestCase):
         self.assertEqual(err_obj["status"], "error")
         self.assertIn("Invalid namespace", err_obj["error"])
         self.assertNotIn("Traceback", res_json.stderr)
+
+    def test_check_core_exceeded_exits_with_code_1(self):
+        # Create temporary CORE.md with 65 lines (exceeds budget of 60)
+        core_file = os.path.join(self.test_dir, "OVERFLOW_CORE.md")
+        lines = [f"# Line {i}\n" for i in range(1, 66)]
+        with open(core_file, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+        env = {**os.environ, "ANTIGRAVITY_CORE_PATH": core_file}
+        res = subprocess.run(
+            [sys.executable, MEM_PATH, "check-core", "--json"],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 1, "check-core must exit with code 1 when budget is exceeded")
+        data = json.loads(res.stdout)
+        self.assertEqual(data["status"], "EXCEEDED")
+        self.assertTrue(data["exceeded"])
+        self.assertEqual(data["line_count"], 65)
+        self.assertEqual(data["remaining_lines"], -5)
+
+    def test_core_template_sync_invariant(self):
+        core_template_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "CORE.template.md"))
+        with open(core_template_file, "r", encoding="utf-8") as f:
+            template_content = f.read().strip()
+        self.assertEqual(
+            mem_engine.DEFAULT_CORE_TEMPLATE.strip(),
+            template_content,
+            "DEFAULT_CORE_TEMPLATE in mem must match CORE.template.md 1:1 line by line",
+        )
 
 
 class TestConcurrencyAndStress(unittest.TestCase):

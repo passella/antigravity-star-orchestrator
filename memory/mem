@@ -30,6 +30,7 @@ except ImportError:
 
 SCHEMA_VERSION = 3
 DEFAULT_CORE_MAX_LINES = 60
+MIN_TOKEN_LENGTH = 2
 VALID_KINDS = ("fact", "learning", "behavior", "decision", "invariant", "playbook")
 
 DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — Hot In-Context Cache)
@@ -320,8 +321,11 @@ class DomainPolicy:
         tokens: list[tuple[str, bool]] = []
         for quoted, word in re.findall(r'"([^"]+)"|(\S+)', raw_query):
             t = (quoted or word).strip()
+            is_quoted = bool(quoted)
             if t:
-                tokens.append((t, bool(quoted)))
+                if not is_quoted and len(t) < MIN_TOKEN_LENGTH:
+                    continue
+                tokens.append((t, is_quoted))
 
         if not tokens:
             return "", []
@@ -514,7 +518,7 @@ class SqliteMemoryRepository:
             # 2. Memories table setup or migration
             row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
             if row is None:
-                conn.executescript(
+                ddl_initial = [
                     """
                     CREATE TABLE IF NOT EXISTS memories (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -532,11 +536,11 @@ class SqliteMemoryRepository:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         UNIQUE(namespace, topic)
-                    );
-
-                    CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);
-                    CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);
-
+                    )
+                    """,
+                    "CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC)",
+                    "CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at)",
+                    """
                     CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
                         topic,
                         content,
@@ -545,18 +549,26 @@ class SqliteMemoryRepository:
                         content='memories',
                         content_rowid='id',
                         tokenize='unicode61 remove_diacritics 2'
-                    );
-
+                    )
+                    """,
+                    """
                     CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories WHEN new.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
                         VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                    END;
-
+                    END
+                    """,
+                    """
                     CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories WHEN old.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                    END;
-
+                    END
+                    """,
+                    """
+                    -- FTS5 External Content State Machine Guard:
+                    -- Em tabelas FTS5 external content (content='memories'), o comando 'delete' NAO e idempotente.
+                    -- Executar 'delete' para um rowid ja removido em soft-delete corrompe a B-Tree invertida do FTS5
+                    -- com SQLITE_CORRUPT ('database disk image is malformed').
+                    -- Portanto, 'WHERE old.deleted_at IS NULL' e uma guarda de estado estritamente obrigatoria.
                     CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
@@ -565,14 +577,20 @@ class SqliteMemoryRepository:
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
                         SELECT new.id, new.topic, new.content, new.tags, new.namespace
                         WHERE new.deleted_at IS NULL;
-                    END;
-                    """
-                )
+                    END
+                    """,
+                ]
+                for stmt in ddl_initial:
+                    conn.execute(stmt)
             else:
-                table_sql = row[0] or ""
-                if "'playbook'" not in table_sql:
+                table_sql = (row[0] or "").lower()
+                cols = [col[1] for col in conn.execute("PRAGMA table_info(memories)").fetchall()]
+                current_ver = conn.execute("PRAGMA user_version;").fetchone()[0]
+                is_v1 = "'playbook'" not in table_sql or "ttl_days" not in cols or current_ver < 2
+
+                if is_v1:
                     conn.execute("PRAGMA foreign_keys=OFF;")
-                    conn.executescript(
+                    v1_upgrade_stmts = [
                         """
                         CREATE TABLE memories_new (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -590,16 +608,20 @@ class SqliteMemoryRepository:
                             created_at TEXT NOT NULL,
                             updated_at TEXT NOT NULL,
                             UNIQUE(namespace, topic)
-                        );
-                        INSERT INTO memories_new (id, namespace, kind, topic, content, tags, access_count, created_at, updated_at)
-                        SELECT id, namespace, kind, topic, content, tags, access_count, created_at, updated_at FROM memories;
-                        DROP TRIGGER IF EXISTS memories_ai;
-                        DROP TRIGGER IF EXISTS memories_ad;
-                        DROP TRIGGER IF EXISTS memories_au;
-                        DROP TABLE memories;
-                        ALTER TABLE memories_new RENAME TO memories;
+                        )
+                        """,
                         """
-                    )
+                        INSERT INTO memories_new (id, namespace, kind, topic, content, tags, access_count, created_at, updated_at)
+                        SELECT id, namespace, kind, topic, content, tags, access_count, created_at, updated_at FROM memories
+                        """,
+                        "DROP TRIGGER IF EXISTS memories_ai",
+                        "DROP TRIGGER IF EXISTS memories_ad",
+                        "DROP TRIGGER IF EXISTS memories_au",
+                        "DROP TABLE memories",
+                        "ALTER TABLE memories_new RENAME TO memories",
+                    ]
+                    for stmt in v1_upgrade_stmts:
+                        conn.execute(stmt)
                     conn.execute("PRAGMA foreign_keys=ON;")
 
                 cols = [col[1] for col in conn.execute("PRAGMA table_info(memories)").fetchall()]
@@ -618,23 +640,29 @@ class SqliteMemoryRepository:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);")
 
                 # Replace triggers with soft-delete-aware triggers and rebuild FTS5 index
-                conn.executescript(
+                trigger_stmts = [
+                    "DROP TRIGGER IF EXISTS memories_ai",
+                    "DROP TRIGGER IF EXISTS memories_ad",
+                    "DROP TRIGGER IF EXISTS memories_au",
                     """
-                    DROP TRIGGER IF EXISTS memories_ai;
-                    DROP TRIGGER IF EXISTS memories_ad;
-                    DROP TRIGGER IF EXISTS memories_au;
-
-                    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories WHEN new.deleted_at IS NULL BEGIN
+                    CREATE TRIGGER memories_ai AFTER INSERT ON memories WHEN new.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
                         VALUES (new.id, new.topic, new.content, new.tags, new.namespace);
-                    END;
-
-                    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories WHEN old.deleted_at IS NULL BEGIN
+                    END
+                    """,
+                    """
+                    CREATE TRIGGER memories_ad AFTER DELETE ON memories WHEN old.deleted_at IS NULL BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         VALUES ('delete', old.id, old.topic, old.content, old.tags, old.namespace);
-                    END;
-
-                    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
+                    END
+                    """,
+                    """
+                    -- FTS5 External Content State Machine Guard:
+                    -- Em tabelas FTS5 external content (content='memories'), o comando 'delete' NAO e idempotente.
+                    -- Executar 'delete' para um rowid ja removido em soft-delete corrompe a B-Tree invertida do FTS5
+                    -- com SQLITE_CORRUPT ('database disk image is malformed').
+                    -- Portanto, 'WHERE old.deleted_at IS NULL' e uma guarda de estado estritamente obrigatoria.
+                    CREATE TRIGGER memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
                         WHERE old.deleted_at IS NULL;
@@ -642,14 +670,15 @@ class SqliteMemoryRepository:
                         INSERT INTO memories_fts(rowid, topic, content, tags, namespace)
                         SELECT new.id, new.topic, new.content, new.tags, new.namespace
                         WHERE new.deleted_at IS NULL;
-                    END;
+                    END
+                    """,
+                    "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')",
+                ]
+                for stmt in trigger_stmts:
+                    conn.execute(stmt)
 
-                    INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
-                    """
-                )
-
-            # 3. Memory history table
-            conn.executescript(
+            # 3. Memory history table and auxiliary structures
+            auxiliary_ddl = [
                 """
                 CREATE TABLE IF NOT EXISTS memory_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -663,11 +692,11 @@ class SqliteMemoryRepository:
                     source TEXT NOT NULL,
                     confidence REAL NOT NULL,
                     archived_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_history_mem_id ON memory_history(memory_id);
-                CREATE INDEX IF NOT EXISTS idx_history_ns_topic ON memory_history(namespace, topic);
-
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_history_mem_id ON memory_history(memory_id)",
+                "CREATE INDEX IF NOT EXISTS idx_history_ns_topic ON memory_history(namespace, topic)",
+                """
                 CREATE TABLE IF NOT EXISTS memory_edges (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     source_id INTEGER NOT NULL,
@@ -677,11 +706,11 @@ class SqliteMemoryRepository:
                     UNIQUE(source_id, target_id, relation),
                     FOREIGN KEY(source_id) REFERENCES memories(id) ON DELETE CASCADE,
                     FOREIGN KEY(target_id) REFERENCES memories(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges(source_id);
-                CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id);
-
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges(source_id)",
+                "CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id)",
+                """
                 CREATE TABLE IF NOT EXISTS prospective_tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     namespace TEXT NOT NULL,
@@ -690,16 +719,18 @@ class SqliteMemoryRepository:
                     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'done')),
                     created_at TEXT NOT NULL,
                     completed_at TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_prospective_ns_status ON prospective_tasks(namespace, status);
-
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS idx_prospective_ns_status ON prospective_tasks(namespace, status)",
+                """
                 CREATE TABLE IF NOT EXISTS synonyms (
                     term TEXT PRIMARY KEY,
                     expanded TEXT NOT NULL
-                );
-                """
-            )
+                )
+                """,
+            ]
+            for stmt in auxiliary_ddl:
+                conn.execute(stmt)
 
             # 4. Populate default synonyms if empty
             syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
@@ -1216,25 +1247,57 @@ class SqliteMemoryRepository:
             for d in docs:
                 c_at = d.created_at or default_ts
                 u_at = d.updated_at or default_ts
-                conn.execute(
-                    """
-                    INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, version, source, confidence, deleted_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-                    ON CONFLICT(namespace, topic) DO UPDATE SET
-                        kind = excluded.kind,
-                        content = excluded.content,
-                        tags = excluded.tags,
-                        access_count = excluded.access_count,
-                        ttl_days = excluded.ttl_days,
-                        version = excluded.version,
-                        source = excluded.source,
-                        confidence = excluded.confidence,
-                        deleted_at = NULL,
-                        created_at = excluded.created_at,
-                        updated_at = excluded.updated_at
-                    """,
-                    (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, d.version, d.source, d.confidence, c_at, u_at),
-                )
+                existing = conn.execute(
+                    "SELECT id, namespace, kind, topic, content, tags, version, source, confidence FROM memories WHERE namespace = ? AND topic = ?",
+                    (d.namespace, d.topic),
+                ).fetchone()
+
+                if existing is None:
+                    conn.execute(
+                        """
+                        INSERT INTO memories (namespace, kind, topic, content, tags, access_count, ttl_days, version, source, confidence, deleted_at, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                        """,
+                        (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, d.version, d.source, d.confidence, c_at, u_at),
+                    )
+                else:
+                    # Archive snapshot before overwriting
+                    conn.execute(
+                        """
+                        INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            existing["id"],
+                            existing["namespace"],
+                            existing["kind"],
+                            existing["topic"],
+                            existing["content"],
+                            existing["tags"] or "",
+                            existing["version"],
+                            existing["source"],
+                            existing["confidence"],
+                            u_at,
+                        ),
+                    )
+                    new_version = existing["version"] + 1
+                    conn.execute(
+                        """
+                        UPDATE memories
+                        SET kind = ?,
+                            content = ?,
+                            tags = ?,
+                            access_count = ?,
+                            ttl_days = ?,
+                            version = ?,
+                            source = ?,
+                            confidence = ?,
+                            deleted_at = NULL,
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (d.kind, d.body, d.tags, d.access_count, d.ttl_days, new_version, d.source, d.confidence, u_at, existing["id"]),
+                    )
 
             for d in docs:
                 for link_str in d.links:
@@ -1663,6 +1726,7 @@ class MemoryEngineController:
         db_path: str,
         core_path: str,
         core_template_path: str,
+        lock_path: str | None = None,
     ) -> None:
         self._repo = repo
         self._clock = clock
@@ -1670,7 +1734,7 @@ class MemoryEngineController:
         self._db_path = db_path
         self._core_path = core_path
         self._core_template_path = core_template_path
-        self._lock_path = os.path.join(mem_dir, ".core.lock")
+        self._lock_path = lock_path or os.environ.get("ANTIGRAVITY_CORE_LOCK_PATH") or os.path.join(mem_dir, ".core.lock")
 
     def _print_prospective_alerts(self, namespaces: Sequence[str]) -> None:
         if not namespaces:
@@ -1817,7 +1881,9 @@ class MemoryEngineController:
         syn_map = self._repo.get_synonyms()
         fts_query, syns = DomainPolicy.build_fts_query(args.query, syn_map)
         if not fts_query:
-            raise DomainValidationError("Empty search query")
+            raise DomainValidationError(
+                f"Empty or invalid search query '{args.query}' (words must have at least {MIN_TOKEN_LENGTH} characters unless quoted in double quotes)"
+            )
 
         records = self._repo.search_fts(fts_query, args.ns, args.limit, prioritize_episodic=False)
 
@@ -2501,9 +2567,10 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
 
 def main() -> None:
     mem_dir = os.path.dirname(os.path.abspath(__file__))
-    db_path = os.path.join(mem_dir, "archival.db")
-    core_path = os.path.join(mem_dir, "CORE.md")
-    core_template_path = os.path.join(mem_dir, "CORE.template.md")
+    db_path = os.environ.get("ANTIGRAVITY_DB_PATH") or os.path.join(mem_dir, "archival.db")
+    core_path = os.environ.get("ANTIGRAVITY_CORE_PATH") or os.path.join(mem_dir, "CORE.md")
+    core_template_path = os.environ.get("ANTIGRAVITY_CORE_TEMPLATE_PATH") or os.path.join(mem_dir, "CORE.template.md")
+    lock_path = os.environ.get("ANTIGRAVITY_CORE_LOCK_PATH") or os.path.join(mem_dir, ".core.lock")
 
     repo = SqliteMemoryRepository(db_path=db_path)
     clock = UtcClockAdapter()
@@ -2514,6 +2581,7 @@ def main() -> None:
         db_path=db_path,
         core_path=core_path,
         core_template_path=core_template_path,
+        lock_path=lock_path,
     )
 
     parser = build_parser(controller)
