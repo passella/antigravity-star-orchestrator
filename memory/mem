@@ -43,7 +43,7 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
 - **Invariantes Operacionais:**
   1. **Lei Zero (Zero Assumptions):** NUNCA assumir decisões de negócio, arquitetura, contratos ou escopo. Delegar ao usuário com opções e recomendação técnica clara.
   2. **Git Seguro:** Proibição absoluta de `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
-  3. **Topologia Estrela + DAG Fan-Out:** Decomposição atômica máxima, disparo paralelo e Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`).
+  3. **Topologia Estrela + DAG Fan-Out & Zero Project I/O:** Decomposição atômica máxima, disparo paralelo, Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`) e Zero Project I/O no `orchestrator` (apenas `CORE.md` permitido; todo *Discovery* delegado a `flash_lite`).
   4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In (sincronia 1:1 obrigatória com `CORE.template.md`). Subagentes gravam em L2 (`mem`) e reportam deltas.
   5. **Sugestão Proativa de Especialista (Calibrada):** Em todo fallback para `agent-default` em domínio especializado recorrente, propor novo `agent-<domain>`.
   6. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas.
@@ -55,7 +55,7 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
 
 ## 🧭 3. Semantic Directory (Ponteiros L2 & Plugins Especialistas)
 > *Consulte L2 (`~/.gemini/memory/mem search "<termo>" [--ns <dominio>]`) apenas quando a subtarefa envolver os tópicos abaixo:*
-- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`, `proactive-specialist-suggestion`, `core-template-sync-invariant`.
+- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `orchestrator-zero-project-io`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`, `proactive-specialist-suggestion`, `core-template-sync-invariant`.
 - **`default`** (`~/.gemini/agents/agent-default/AGENT.md`): Fallback generalista (Shell, Linux, Python/scripts, Web Search, Bootstrap).
 <!-- Especialistas: - **<domain>** (~/.gemini/agents/agent-<domain>/AGENT.md): Resumo de invariantes -->
 <!-- Projetos: - **proj:<name>**: Tópicos indexados em L2 -->
@@ -1763,8 +1763,8 @@ class MemoryEngineController:
                 "global",
                 "decision",
                 "dag-parallel-model-orchestration",
-                "O Orchestrator opera como DAG Scheduler e Auto-Model Router: 1) Decomposicao Atomica (quebra pedidos monoliticos em micro-tarefas ortogonais). 2) Paralelismo Maximo Fan-Out (dispara todas as subtarefas sem dependencia simultaneamente no mesmo turno via invoke_subagent). 3) Tiered Model Orchestration (seleciona automaticamente Model='flash_lite' para IO/inspecao, 'flash' para operacoes padrao, 'pro' para raciocinio profundo e 'inherit' para fronteira). 4) Comunicacao Maquina-Maquina telegrafica com Differential Context Passing.",
-                "orchestrator,dag,parallelism,model-routing,token-economy",
+                "O Orchestrator opera exclusivamente como DAG Scheduler e Auto-Model Router com Zero Project I/O (leitura e escrita restritas a CORE.md; todo Discovery de projeto, leitura de configs e execução técnica são 100% delegados a subagentes): 1) Decomposicao Atomica (quebra pedidos monoliticos em micro-tarefas ortogonais). 2) Paralelismo Maximo Fan-Out (dispara todas as subtarefas sem dependencia simultaneamente no mesmo turno via invoke_subagent). 3) Tiered Model Orchestration (seleciona automaticamente Model='flash_lite' para IO/Discovery/inspecao mecanica, 'flash' para operacoes padrao, 'pro' para raciocinio profundo e 'inherit' para fronteira). 4) Comunicacao Maquina-Maquina telegrafica com Differential Context Passing.",
+                "orchestrator,dag,parallelism,model-routing,token-economy,zero-project-io",
             ),
             (
                 "global",

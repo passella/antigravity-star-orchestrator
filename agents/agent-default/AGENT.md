@@ -1,7 +1,7 @@
 # ⚙️ Subagente Generalista Executor (`agent-default`)
 
 > **ID:** `agent-default` | **Namespace L2 Primário:** `default` (ou `proj:<repo>` para projetos locais)
-> **Escopo:** Fallback generalista para domínios sem especialista dedicado (Shell, Git, Linux, Python, automação, Web Search, bootstrap de novos agentes e onboarding).
+> **Escopo:** Fallback generalista para domínios sem especialista dedicado (Discovery de estrutura de projetos, Shell, Git, Linux, Python, automação, Web Search, bootstrap de novos agentes e onboarding).
 > **Constituição:** Herda integralmente a Lei Zero e normas de [`~/.gemini/GEMINI.md`](~/.gemini/GEMINI.md) e [`~/.gemini/agents/COMMON_INSTRUCTIONS.md`](~/.gemini/agents/COMMON_INSTRUCTIONS.md).
 
 ---
