@@ -1,10 +1,12 @@
 # 🚀 Antigravity: Global Star-Topology Multi-Agent Ecosystem & Hybrid Cognitive Memory Engine
 
+🌐 **Idiomas / Languages:** **Português (BR)** | [English](README.en.md) | [Español](README.es.md) | [简体中文](README.zh-CN.md)
+
 [![Architecture: Star-Topology DAG](https://img.shields.io/badge/Architecture-Star--Topology_DAG-6f42c1?style=flat-square)](#2-pilares-arquiteturais)
 [![Memory Engine: Tier-1 + Tier-2 Schema v3](https://img.shields.io/badge/Memory_Engine-2--Tier_SQLite_WAL_%2B_FTS5_(Schema_v3)-007ec6?style=flat-square)](#3-arquitetura-cognitiva-híbrida-das-7-memórias)
 [![Design: Clean / Hexagonal](https://img.shields.io/badge/Design-Clean_%2F_Ports_%26_Adapters-2ea44f?style=flat-square)](#4-engenharia-interna-do-motor-l2-geminimemorymem)
 [![Dependencies: Zero (Python 3 Stdlib)](https://img.shields.io/badge/Dependencies-Zero_(Python_3_Stdlib)-ffd343?style=flat-square)](#4-engenharia-interna-do-motor-l2-geminimemorymem)
-[![Tests: 32 Passing (Unittest)](https://img.shields.io/badge/Tests-32_Passing_(Stdlib_Unittest)-brightgreen?style=flat-square)](#10-suíte-de-testes-automatizados)
+[![Tests: 31 Passing (Unittest)](https://img.shields.io/badge/Tests-31_Passing_(Stdlib_Unittest)-brightgreen?style=flat-square)](#10-suíte-de-testes-automatizados)
 
 O **Antigravity** é um framework de orquestração multi-agente em **Topologia Estrela Estrita** e um motor de **Memória Cognitiva Híbrida 2-Tier (Schema L2 v3)** projetado para operar nativamente sobre o diretório global `~/.gemini`. Ele transforma sessões isoladas de LLMs em um sistema distribuído determinístico de engenharia de software — combinando escalonamento paralelo em grafos acíclicos direcionados (**DAG Fan-Out / Fan-In**), roteamento cognitivo dinâmico de modelos (**Auto-Model Routing**), governança **Zero Assumptions (Lei Zero)** e persistência transacional concorrente em SQLite WAL + FTS5 sem nenhuma dependência externa.
 
@@ -53,14 +55,16 @@ Toda solicitação complexa é quebrada no maior número possível de **subtaref
 * **Reúso Inteligente de Sessão vs. Paralelismo:** Subtarefas concorrentes utilizam instâncias paralelas via `invoke_subagent`; etapas sequenciais no mesmo domínio que se beneficiam do cache de contexto reutilizam o `conversationId` existente via `send_message`.
 
 ### 2.3. Auto-Model Routing Cognitivo
-Ao invocar subagentes (`invoke_subagent(TypeName="self", Model=...)`), o `orchestrator` seleciona o menor modelo capaz de resolver a subtarefa com excelência, otimizando latência e custo de tokens:
+Ao invocar subagentes (`invoke_subagent(TypeName="self", Model=...)`) ou workers (`swarm`), o `orchestrator` seleciona o menor modelo e nível de esforço (`low`, `medium`, `high`, `xhigh`, `max`) capazes de resolver a subtarefa com excelência, otimizando latência e custo de tokens sobre o catálogo real de **23 modelos** do `agy`:
 
-| Parâmetro `Model` | Complexidade Cognitiva | Casos de Uso Ideais |
+| Parâmetro `Model` | Complexidade & Esforço | Casos de Uso Ideais, Catálogo Completo (23 Modelos) & Regimes de Cota |
 | :--- | :--- | :--- |
-| **`"flash_lite"`** | **Baixa (I/O & Mecânica)** | Leitura de arquivos/configs/logs, listagens de diretórios, `git status`/`diff`, buscas rápidas no banco L2 (`mem search`), checagem de portas e formatação de texto. |
-| **`"flash"`** | **Média (Operacional Padrão)** | Implementação de classes/funções delimitadas, testes unitários, scripts de automação, Dockerfiles, queries SQL (DDL/DML) e configurações de build. |
-| **`"pro"`** | **Alta (Raciocínio Profundo)** | Arquitetura limpa (Clean Architecture / Ports & Adapters), concorrência crítica e lock-free, otimização severa de performance e debugging arquitetural complexo. |
-| **`"inherit"`** | **Fronteira (Gemini 4 Argon)** | Herda o modelo principal da sessão (**Gemini 4 Argon**) para desafios *frontier* extremos ou quando exigido explicitamente pelo usuário. |
+| **`"flash_lite"`** | **Tier 1: Baixa (Esforço `low` — I/O & Mecânica)** | Leitura de arquivos/configs/logs, listagens de diretórios, `git status`/`diff`, buscas rápidas no L2 (`mem search`), checagem de portas e formatação. **Reset Diário:** `gemini-3.8-flash-low`, `gemini-4-hydrogen-low`, `gemini-4-neon-low`, `claude-sonnet-5-5-low`, `claude-opus-5-5-low` \| **Reset Semanal (7d):** `gemini-4-argon-low`. |
+| **`"flash"`** | **Tier 2: Média (Esforço `medium` — Operacional Padrão)** | Implementação de classes/funções delimitadas, testes unitários, scripts de automação, Dockerfiles, queries SQL (DDL/DML) e configurações de build. **Reset Diário:** `gemini-3.8-flash-medium`, `gemini-3.8-flash-high`, `gpt-oss-120b-medium`, `gemini-4-hydrogen-medium`, `gemini-4-neon-medium`, `claude-sonnet-5-5-medium`. |
+| **`"pro"`** | **Tier 3: Alta (Esforço `high` / `xhigh` — Arquitetura Profunda)** | Clean Architecture / Ports & Adapters, concorrência crítica, refatoração estrutural pesada, BVA e debugging complexo preservando a cota semanal do Argon. **Reset Diário:** `gemini-4-neon-high`, `gemini-4-hydrogen-high`, `claude-sonnet-5-5-high`, `claude-opus-5-5-medium`, `gemini-4-neon-xhigh`, `gemini-4-hydrogen-xhigh`. |
+| **`"inherit"`** | **Tier 4: Fronteira (Esforço `xhigh` / `max` / `high` Frontier)** | Decisões arquiteturais inéditas, desafios *frontier* extremos e auditoria adversarial. **Reset Diário:** `claude-opus-5-5-high`, `gemini-4-neon-xhigh`, `gemini-4-hydrogen-xhigh`, `gemini-pro-orchestrator-neon` \| **Reset Semanal (7d):** `gemini-4-argon-medium`, `gemini-4-argon-high`, `gemini-pro-orchestrator-g1-pro`. |
+
+* **Auto-Failover Inteligente de Cota (429 / Quota Exhaustion):** Como o catálogo possui 23 modelos e 5 níveis de esforço (`low`, `medium`, `high`, `xhigh`, `max`) distribuídos em pools de cota independentes, se um worker encontrar exaustão de cota (`RESOURCE_EXHAUSTED` / HTTP 429) antes ou no meio de uma tarefa, o `orchestrator` redireciona automaticamente a execução para um modelo/tier de capacidade e esforço equivalentes com cota disponível (`flash_lite` $\leftrightarrow$ `flash` $\leftrightarrow$ `pro` $\leftrightarrow$ `inherit`, ou troca *in-place* entre as famílias Gemini 3.8 Flash, Gemini 4 Neon/Hydrogen/Argon, GPT-OSS, Claude Sonnet/Opus 5.5 e Orchestrator preservando o progresso parcial), concluindo a tarefa de forma transparente sem interromper o fluxo.
 
 ### 2.4. Lei Zero Inviolável (Protocolo Zero Assumptions)
 Nenhum agente (`orchestrator` ou subagente) pode deduzir ou escolher silenciosamente diante de incertezas em:
@@ -92,16 +96,18 @@ CONTEXT: <Apenas paths, snippets e invariantes estritamente necessários>
 ```
 <!-- slide -->
 ```yaml
-# 2. Escalação de Dúvida / Dependência (Subagente -> orchestrator)
+# 2. Escalação de Dúvida / Dependência / Handoff QA+AppSec (Subagente -> orchestrator)
 STATUS: NEED
 AGENT: <meu-agent-id>
 NEEDS:
-  - target_domain: "<domain | default | orchestrator>"
-    atomic_goal: "<Ação necessária de outro domínio OU dúvida/decisão a delegar ao usuário>"
-    context: "<Paths, código, tabelas ou cenário técnico>"
+  - target_domain: "<domain | default | orchestrator>" # String única OU lista (ex: ["qa", "appsec"])
+    atomic_goal: "<Ação necessária de outro domínio/gates OU dúvida/decisão a delegar ao usuário>"
+    context: "<Resumo de mudanças, comandos de build/test, riscos ou cenário técnico>"
     options: ["<Opção 1 [Recomendada]>", "<Opção 2>"] # Obrigatório para dúvidas/decisões
     recommendation: "<Fundamentação técnica objetiva da opção recomendada>"
-RESUME_WITH: "<Dado ou decisão exata necessária para prosseguir>"
+PATHS: ["<caminhos absolutos criados/modificados/inspecionados>"]
+MEMORY_DELTA: "<none | namespace/topic gravado no L2 via mem upsert/link/defer>"
+RESUME_WITH: "<Dado/decisão exata necessária para prosseguir OU confirmação QA+AppSec>"
 ```
 <!-- slide -->
 ```yaml
@@ -114,16 +120,30 @@ MEMORY_DELTA: "<none | namespace/topic gravado no L2 via mem upsert/link/defer>"
 ```
 ````
 
-### 2.7. Dynamic Specialist Plugin Registry & Sugestão Proativa Calibrada
+> [!NOTE]
+> O campo `target_domain` em `STATUS: NEED` aceita tanto uma string única (ex: `"rust"`, `"orchestrator"`) quanto uma lista de domínios (ex: `["qa", "appsec"]`). Todo agente de desenvolvimento (`EXTENDS: agent-dev-base`, exceto `agent-qa` e `agent-appsec` em auditoria) encerra alterações de código/config/infra/scripts emitindo obrigatoriamente `STATUS: NEED` com `target_domain: ["qa", "appsec"]`; reciprocamente, diante de qualquer falha ou vulnerabilidade, `agent-qa` e `agent-appsec` emitem `STATUS: NEED` com `target_domain: "<dev-stack>"` para correção no código, repetindo o ciclo até duplo `STATUS: COMPLETED`.
+
+### 2.7. Dynamic Specialist Plugin Registry & Revisão de Fim de Conversa
 Subagentes especialistas (`~/.gemini/agents/agent-<domain>/AGENT.md`) funcionam como plugins dinâmicos indexados na Seção 3 (`Semantic Directory`) de `CORE.md`.
-* **Invariante de Sugestão Proativa Calibrada (`proactive-specialist-suggestion`):** Em **100% das vezes** em que o `orchestrator` recorrer ao fallback `agent-default` para atender a um domínio de engenharia recorrente, stack arquitetural ou workflow especializado ausente no `Semantic Directory` de `CORE.md`, o `orchestrator` é **obrigado** a incluir na mesma resposta final ao usuário uma proposta estruturada de criação do especialista dedicado (`agent-<domain>`), especificando:
+* **Análise Obrigatória de Fim de Conversa & Sugestão Proativa de Especialistas (`end-of-conversation-specialist-review` / `proactive-specialist-suggestion`):** Ao final de **toda** conversa ou entrega com o usuário — independentemente de ter ocorrido fallback para `agent-default` ou não — o `orchestrator` analisa a conversa como um todo para verificar se compensa criar novos agentes especialistas (ex.: novo domínio/stack/workflow recorrente, ferramenta especializada ou sobrecarga de um especialista existente). Quando compensar, o `orchestrator` é **obrigado** a incluir na resposta final uma proposta estruturada dos especialistas recomendados, especificando:
   1. **Nome do Agente:** `agent-<domain>`
   2. **Caminho:** `~/.gemini/agents/agent-<domain>/AGENT.md`
-  3. **Escopo e Invariantes do Domínio**
-  4. **Namespace L2 Primário:** `<domain>`
-* *Calibragem Anti-Fadiga:* Essa sugestão é dispensada apenas em operações utilitárias triviais ou efêmeras (como leitura de arquivo avulso ou comando shell pontual).
+  3. **Herança (`EXTENDS`):** Aplicável ao domínio, se houver
+  4. **Escopo e Invariantes do Domínio**
+  5. **Namespace L2 Primário:** `<domain>`
+  6. **Justificativa do Benefício**
+* *Calibragem Anti-Ruído:* Quando não compensar (domínio já bem coberto pelos especialistas atuais ou demanda puramente trivial/pontual), o `orchestrator` não deve forçar sugestões artificiais.
 
-### 2.8. Diagrama Arquitetural Completo
+### 2.8. Pipeline Universal de Qualidade (`dev <-> qa / appsec`)
+Toda demanda de desenvolvimento de software no ecossistema (independentemente da linguagem ou stack tecnológica) executa um ciclo bidirecional obrigatório no DAG antes da entrega final ao usuário:
+1. **`dev` (Especialista da Linguagem/Stack):** Implementação ou refatoração aderente a SOLID, Clean Architecture / Ports & Adapters e invariantes do domínio. Antes de encerrar alterações de código (features, fixes, contratos, CLI/flags, APIs, dependências ou configs), verifica e atualiza obrigatoriamente as documentações impactadas (`README.md`, `docs/`, `CHANGELOG.md`, guias/schemas) no mesmo turno (**Doc-Sync Gate**) e executa o **Local CI Gate** (simulação local 1:1 de `.github/workflows/*.yml` com `zizmor` pedântico, `actionlint`, checagem de SHAs em Git Tags imutáveis/Node.js e execução real de linters/testes/SCA/`run:` do CI). Ao concluir qualquer alteração de código, configuração, infraestrutura ou scripts (mesmo após passar nos testes locais), todo agente que herda de `agent-dev-base` DEVE encerrar emitindo obrigatoriamente `STATUS: NEED` com `target_domain: ["qa", "appsec"]` (e não `STATUS: COMPLETED` isolado), informando resumo objetivo das mudanças, `PATHS`, comandos de build/test executados, status do Doc-Sync Gate, evidências do Local CI Gate e riscos/pontos de atenção.
+2. **`qa` (`agent-qa`):** Quality Gate adversarial independente com testes de borda (BVA), *fuzzing*/*chaos*, linters, auditoria estrita de invariantes, execução obrigatória do **Local CI Gate** 1:1 com `.github/workflows/*.yml` antes de declarar `COMPLETED` e verificação de aderência documental (detecção de *drift* entre código e docs/schemas).
+3. **`appsec` (`agent-appsec`):** Revisão contínua de segurança cobrindo OWASP/CWE, SAST, higienização de entradas e hardening de *supply-chain*.
+* **Devolução Obrigatória & Loop de Bloqueio (`qa/appsec -> "<dev-stack>"`):** Sempre que `agent-qa` ou `agent-appsec` encontrar **qualquer** falha, regressão, violação de invariante, bug, vulnerabilidade ou achado de segurança, DEVE emitir obrigatoriamente `STATUS: NEED` direcionado ao `target_domain: "<dev-stack>"` do agente dev especialista adequado com relatório forense acionável (arquivo, linha, causa raiz, severidade, reprodução/evidência e correção esperada) para que o dev corrija o código — jamais encerrando com `STATUS: COMPLETED` com achados abertos. Após corrigir, o dev reemite `STATUS: NEED` (`target_domain: ["qa", "appsec"]`), repetindo o ciclo até que ambos aprovem com `STATUS: COMPLETED`.
+* **Salvaguarda Anti-Loop:** `agent-qa` e `agent-appsec` (que também herdam de `agent-dev-base`) são isentos do handoff `["qa", "appsec"]` ao concluírem suas validações/auditorias — emitem `STATUS: COMPLETED` apenas quando 100% aprovado (zero achados abertos) ou `STATUS: NEED` para `"<dev-stack>"` quando houver achados.
+* **Exceções Estritas de Escopo:** O handoff e o encadeamento completo são dispensados apenas em tarefas estritamente *read-only* (sem edição de arquivos), geração de mensagens de commit/PR ou ajustes textuais triviais sem alteração de código/config/infra/scripts.
+
+### 2.9. Diagrama Arquitetural Completo
 
 ```mermaid
 flowchart TB
@@ -339,13 +359,13 @@ sequenceDiagram
     W2-->>O: STATUS: COMPLETED (RESULT, PATHS, MEMORY_DELTA)
     O->>L1: 4. Single-Writer Fan-In: Atualiza CORE.md (se houver delta L1)
     O->>L2: 5. Valida orçamento: mem check-core (<= 60 linhas)
-    O-->>U: 6. Saudação Limpa + Síntese Executiva + Sugestão Proativa (se fallback)
+    O-->>U: 6. Saudação Limpa + Síntese Executiva + Revisão de Especialistas (se compensar)
 ```
 
 1. **Fase 1 — Boot L1 & Discovery Leve (Turno 1):** O `orchestrator` recebe a mensagem do usuário, lê `~/.gemini/memory/CORE.md` para identificar o nome do usuário, seus invariantes e os especialistas disponíveis no `Semantic Directory`. Se precisar reconhecer a estrutura do repositório alvo, lê apenas manifestos de topo dentro da whitelist semântica (`< 16 KB`).
 2. **Fase 2 — Decomposição DAG, Auto-Model Routing & Lei Zero:** O `orchestrator` divide o problema em subtarefas ortogonais, seleciona o `Model` ideal (`flash_lite`, `flash`, `pro` ou `inherit`) e dispara múltiplos subagentes em paralelo com o cabeçalho `[SUBAGENT_TASK]`. Se surgir qualquer dúvida de negócio, contrato ou arquitetura, o fluxo pausa via `STATUS: NEED` e consulta o usuário com opções e recomendação técnica.
 3. **Fase 3 — Execução 2-Tier & Persistência L2 Concorrente:** Cada subagente realiza o boot enxuto lendo em paralelo `CORE.md`, `COMMON_INSTRUCTIONS.md` e seu `AGENT.md`. Consulta o L2 sob demanda (`mem search`, `mem get` ou `mem recall-error` diante de falhas), executa sua tarefa estritamente dentro do domínio, grava novos aprendizados no L2 (`mem upsert` com `--source` e `--confidence`) sem tocar no `CORE.md`, e retorna `STATUS: COMPLETED` informando `MEMORY_DELTA` e `PATHS`.
-4. **Fase 4 — Fan-In Single-Writer, Auditoria `check-core` & Resposta Final:** O `orchestrator` consolida os resultados, atualiza o `CORE.md` se houver novos ponteiros estruturais (mantendo a sincronia tripla 1:1 caso altere o template), executa `mem check-core` para atestar o limite de $\le 60$ linhas e entrega a resposta iniciando com a saudação limpa pelo nome do usuário (incluindo sugestão proativa de novo `agent-<domain>` caso tenha ocorrido fallback para `agent-default` em domínio especializado).
+4. **Fase 4 — Fan-In Single-Writer, Auditoria `check-core` & Resposta Final:** O `orchestrator` consolida os resultados, atualiza o `CORE.md` se houver novos ponteiros estruturais (mantendo a sincronia tripla 1:1 caso altere o template), executa `mem check-core` para atestar o limite de $\le 60$ linhas e entrega a resposta iniciando com a saudação limpa pelo nome do usuário — incluindo a revisão de fim de conversa com sugestão estruturada de novos `agent-<domain>` sempre que o contexto demonstrar benefício real (sem forçar sugestões artificiais em demandas triviais ou já bem cobertas).
 
 ---
 
@@ -358,6 +378,9 @@ O arquivo [`.gitignore`](.gitignore) adota uma política **Default-Deny (`*`) co
 ├── .gitignore                        # ✅ [Versionado - Starter Kit] Regra '*' + Whitelist estrita do Starter Kit
 ├── GEMINI.md                         # ✅ [Versionado - Starter Kit] Constituição Global (Lei Zero, Estrela, M2M, 7 Memórias)
 ├── README.md                         # ✅ [Versionado - Starter Kit] Documentação Arquitetural e Operacional Completa
+├── README.en.md                      # ✅ [Versionado - Starter Kit] Documentação Arquitetural e Operacional (English)
+├── README.es.md                      # ✅ [Versionado - Starter Kit] Documentação Arquitetural e Operacional (Español)
+├── README.zh-CN.md                   # ✅ [Versionado - Starter Kit] Documentação Arquitetural e Operacional (简体中文)
 │
 ├── agents/
 │   ├── COMMON_INSTRUCTIONS.md        # ✅ [Versionado - De Fábrica] Protocolo compartilhado 2-Tier, CLI mem e M2M
@@ -365,14 +388,17 @@ O arquivo [`.gitignore`](.gitignore) adota uma política **Default-Deny (`*`) co
 │   │   └── AGENT.md                  # ✅ [Versionado - De Fábrica] Escalonador DAG, Auto-Model Router e Single-Writer L1
 │   ├── agent-default/
 │   │   └── AGENT.md                  # ✅ [Versionado - De Fábrica] Subagente Generalista Executor (Fallback & Bootstrap)
+│   ├── agent-dev-base/               # 🔒 [Ignorado - Local] Base abstrata SSOT (EXTENDS) com 9 invariantes de engenharia
+│   │   └── AGENT.md
 │   └── agent-<domain>/               # 🔒 [Ignorado - Local] Plugins especialistas criados sob demanda pelo usuário
-│       └── AGENT.md                  #    (Exemplos ilustrativos: agent-postgres, agent-rust, agent-k8s)
+│       └── AGENT.md                  #    (19 plugins locais ativos: 15 EXTENDS agent-dev-base + 4 independentes — ver Seção 8.1)
 │
 ├── memory/
 │   ├── mem                           # ✅ [Versionado - Starter Kit] Motor Cognitivo L2 Hexagonal em Python 3 (Schema v3)
 │   ├── CORE.template.md              # ✅ [Versionado - Starter Kit] Template canônico da Memória Quente L1 (<= 60 linhas)
 │   ├── tests/
-│   │   └── test_mem.py               # ✅ [Versionado - Starter Kit] Suíte com 32 testes automatizados (unittest stdlib)
+│   │   ├── test_mem.py               # ✅ [Versionado - Starter Kit] Suíte com 21 testes automatizados do motor L2 (unittest stdlib)
+│   │   └── test_catalog_parity.py    # ✅ [Versionado - Starter Kit] Suíte de paridade de catálogo (agentes/CORE/dev-base/README)
 │   ├── CORE.md                       # 🔒 [Ignorado - Local] Cache L1 renderizado com a identidade real do usuário
 │   ├── .core.lock                    # 🔒 [Ignorado - Local] Lockfile cross-platform de exclusão mútua do CORE.md
 │   ├── archival.db                   # 🔒 [Ignorado - Local] Banco SQLite WAL + FTS5 local ( + -wal / -shm )
@@ -473,12 +499,38 @@ Apenas **dois agentes vêm de fábrica no Starter Kit versionado no Git**: o **`
 | ID do Agente | Caminho da Definição | Status no Starter Kit (`.gitignore`) | Namespace L2 Primário | Papel e Escopo Operacional |
 | :--- | :--- | :--- | :--- | :--- |
 | **`orchestrator`** | [`~/.gemini/agents/orchestrator/AGENT.md`](agents/orchestrator/AGENT.md) | ✅ **De Fábrica (Versionado)** | `global` | **Agente Default da Sessão Principal:** Escalonador DAG, Auto-Model Router cognitivo, Discovery Read-Only Leve (`< 16 KB`), Single-Writer exclusivo do `CORE.md` e interface executiva com o usuário. |
-| **`agent-default`** | [`~/.gemini/agents/agent-default/AGENT.md`](agents/agent-default/AGENT.md) | ✅ **De Fábrica (Versionado)** | `default` *(ou `proj:<repo>`)* | **Subagente Generalista Executor:** Fallback para domínios sem especialista dedicado (Shell, Git, Linux, Python, automação, Web Search), bootstrap de novos especialistas e First-Boot Onboarding. |
-| **`agent-<domain>`**<br/>*(Exemplos ilustrativos: `agent-postgres`, `agent-rust`, `agent-k8s`)* | `~/.gemini/agents/agent-<domain>/AGENT.md` | 🔒 **Plugin Criado Sob Demanda pelo Usuário (Ignorado no Git)** | `<domain>` *(ex: `postgres`, `rust`, `k8s`)* | **Plugins Especialistas Dinâmicos:** Criados sob demanda (via sugestão proativa calibrada do `orchestrator` ou manualmente) para isolar invariantes profundas de uma stack, linguagem ou arquitetura recorrente. |
+| **`agent-default`** | [`~/.gemini/agents/agent-default/AGENT.md`](agents/agent-default/AGENT.md) | ✅ **De Fábrica (Versionado)** | `default` *(ou `proj:<repo>`)* | **Subagente Generalista Executor:** Fallback para domínios sem especialista dedicado (Discovery, Shell, automação genérica, Web Search), bootstrap de novos especialistas e First-Boot Onboarding. |
+| **`agent-<domain>`**<br/>*(Plugins locais sob demanda)* | `~/.gemini/agents/agent-<domain>/AGENT.md` | 🔒 **Plugin Criado Sob Demanda pelo Usuário (Ignorado no Git)** | `<domain>` | **Plugins Especialistas Dinâmicos:** Criados sob demanda (via sugestão proativa na revisão de fim de conversa do `orchestrator` ou manualmente) para isolar invariantes profundas de uma stack, linguagem ou arquitetura recorrente. Especialistas de engenharia de software herdam a base abstrata [`agent-dev-base`](~/.gemini/agents/agent-dev-base/AGENT.md) via `EXTENDS`. |
 
-### 8.2. Modo 1: Criação Automática via Sugestão Proativa Calibrada
-1. Você solicita uma tarefa de um domínio recorrente ainda não registrado no `CORE.md` (exemplos ilustrativos: otimizar queries em PostgreSQL, criar um serviço em Rust ou configurar manifests Kubernetes).
-2. O `orchestrator` delega a execução imediata para o fallback de fábrica `agent-default` (para não bloquear sua entrega) e, ao final da resposta, apresenta a **Sugestão Proativa de Especialista** propondo a criação do plugin local (ex: `agent-postgres`, `agent-rust`, `agent-k8s`).
+#### Catálogo Completo de Especialistas Locais Registrados (19 Plugins Sob Demanda)
+
+Todos os especialistas abaixo residem localmente em `~/.gemini/agents/agent-<domain>/AGENT.md` (ignorados no Git pelo `.gitignore` Default-Deny). Os **15 especialistas de engenharia** herdam integralmente as 9 invariantes de [`agent-dev-base`](~/.gemini/agents/agent-dev-base/AGENT.md) (SOLID, Ports & Adapters, KISS, DRY, Extrema Performance, Zero-Comments Gate, Sugestão Proativa, Matriz Exaustiva de Testes Failure-First e GoF on-demand), enquanto os **4 especialistas independentes** (`agent-android-re`, `agent-git`, `agent-linux-desktop`, `agent-linux-gaming`) operam com diretrizes próprias focadas em análise estática, versionamento, sistema e otimização de jogos:
+
+| ID do Agente | Caminho da Definição | Namespace L2 Primário | Herança (`EXTENDS`) | Escopo & Invariantes Especializadas |
+| :--- | :--- | :--- | :--- | :--- |
+| **`agent-android-dev`** | `~/.gemini/agents/agent-android-dev/AGENT.md` | `android-dev` | `agent-dev-base` | Desenvolvimento Android nativo (Kotlin, Jetpack Compose, Coroutines/Flow, Gradle Kotlin DSL), Clean Architecture/MVVM, reconstrução *clean-room*, serviços de sistema (`MediaProjection`, `AccessibilityService`, overlays) e IA *on-device* (ML Kit, ONNX Runtime, OpenCV). |
+| **`agent-android-re`** | `~/.gemini/agents/agent-android-re/AGENT.md` | `android-re` | Independente | Engenharia reversa estática defensiva e triagem *read-only* de pacotes Android (`.apk`, `.apkm`, `.xapk`, `.aab`): decodificação binária AXML, inventário de splits/DEX/bibliotecas `.so`, extração de assets e JADX headless (`rea inspect-android-package`). |
+| **`agent-appsec`** | `~/.gemini/agents/agent-appsec/AGENT.md` | `appsec` | `agent-dev-base` | Engenharia AppSec e pentesting autônomo: skills ofensivas (OWASP/API/LLM/Agentic), regras SAST (`OpenGrep`/`Semgrep`/`AST-grep`), modelagem `STRIDE`, calibração `CVSS 3.1`, `SARIF 2.1.0` com URIs seguros, proxy `Caido`/`HTTPQL`, `Strix` CLI/Cloud, PoC reproduzível e higienização `CWE-1236`. |
+| **`agent-ci-cd`** | `~/.gemini/agents/agent-ci-cd/AGENT.md` | `ci-cd` | `agent-dev-base` | Engenharia de pipelines CI/CD e GitHub Actions: derivação estrita ao manifesto/CLI (anti-copy-paste), hardening de supply-chain (`zizmor --persona=pedantic` com 0 findings/suppressed, SHA-40 em Git Tag imutável e zero Node.js depreciado, `actionlint`, `permissions: contents: read`, `persist-credentials: false`, `concurrency`, anti-injection via `env:`, SCA), Local CI Gate 1:1 pré-commit, builds reproduzíveis/estáticos `musl` multi-arch (`--locked`, cache segregado, `strip`, `SHA256SUMS.txt`), smoke tests por arquitetura e `.github/dependabot.yml`. |
+| **`agent-docker-sandbox`** | `~/.gemini/agents/agent-docker-sandbox/AGENT.md` | `docker-sandbox` | `agent-dev-base` | Engenharia Docker/OCI e sandboxing seguro: Dockerfiles multi-stage pinados por `@sha256:`, *least privilege* (não-root, zero `sudo NOPASSWD:ALL`, `cap_drop=["ALL"]`, zero CA/chaves bakeadas), `.git` `:ro`, proteção TOCTOU e `tar --no-same-owner`, isolamento de rede, cgroups/log-rotation, PKI efêmera, sidecars e `docker-py` anti-drift. |
+| **`agent-epub-translator`** | `~/.gemini/agents/agent-epub-translator/AGENT.md` | `epub-translator` | `agent-dev-base` | Tradução autônoma de EPUBs via CLI global `epub-translator-google` (`--headless`, provedores `antigravity`/`google-free`/`google-cloud`), conformidade IDPF OCF, validação `verify`, controle de concorrência, cache ZSTD + SQLite WAL e manutenção da base Rust Hexagonal. |
+| **`agent-git`** | `~/.gemini/agents/agent-git/AGENT.md` | `git` | Independente | Controle de versão Git (*read-only* por padrão): mensagens *Conventional Commits* (3 blocos) e PRs (4 blocos) gravadas em `/tmp/` (retornando o caminho absoluto literal sem despejar o conteúdo), auditoria proativa de versão SemVer no manifesto SSOT (`commit-semver-audit`), gestão de branches/worktrees/conflitos e auditoria anti-vazamento SSOT pré-commit. |
+| **`agent-go`** | `~/.gemini/agents/agent-go/AGENT.md` | `go` | `agent-dev-base` | Engenharia Go 1.24+ idiomática: CLIs/TUIs Charmbracelet (`bubbletea`/`bubbles`/`lipgloss`/`chroma`), sidecars IPC (`socketpair` POSIX / TCP loopback + HMAC-SHA256 no Windows, framing length-prefixed JSON, deltas), concorrência segura (`context`/`errgroup`), Ports & Adapters e builds estáticos `CGO_ENABLED=0`. |
+| **`agent-kotlin`** | `~/.gemini/agents/agent-kotlin/AGENT.md` | `kotlin` | `agent-dev-base` | Engenharia Kotlin 2.x (JVM/KMP, Gradle Kotlin DSL, Coroutines & Flow) alinhada às *Kotlin Coding Conventions* oficiais, modelagem algébrica de domínio, `@JvmInline value class`, Ports & Adapters e testes com JUnit 5 e MockK. |
+| **`agent-linux-desktop`** | `~/.gemini/agents/agent-linux-desktop/AGENT.md` | `linux-desktop` | Independente | Administração Linux Desktop *host-agnostic*: detecção dinâmica de distro/gerenciador (`pacman`/`apt`/`dnf`/`zypper`/Flatpak `--user`), padrões XDG, servidores gráficos Wayland/X11, rede dual-stack (IPv4/IPv6) e supervisão de processos de usuário. |
+| **`agent-linux-gaming`** | `~/.gemini/agents/agent-linux-gaming/AGENT.md` | `linux-gaming` | Independente | Otimização de performance e compatibilidade de jogos no Linux *host-agnostic* (Steam/Proton, Heroic, Lutris, VKD3D-Proton, DXVK, NVIDIA PRIME/RADV/ANV, `ntsync`, `gamemode`, `gamescope`, `mangohud`, `scx`, `protontricks`, shader caches e tweaks por engine), com edição VDF segura, backups `.bak.<timestamp>`, gestão de VRAM e persistência por AppID em L2. |
+| **`agent-llm-agents`** | `~/.gemini/agents/agent-llm-agents/AGENT.md` | `llm-agents` | `agent-dev-base` | Arquiteturas multi-agente e sistemas LLM: `openai-agents`, LiteLLM, MCP sob demanda, roteamento multi-modelo, Jinja (`StrictUndefined`) + prefix caching (`<cache_point>`), coerção JSON Schema, spill de outputs, compactação segura `tool_call`/`tool_result`, guardrails determinísticos, `RunContext`, RBAC real e LLM-as-a-Judge. |
+| **`agent-oreilly-dl`** | `~/.gemini/agents/agent-oreilly-dl/AGENT.md` | `oreilly-dl` | `agent-dev-base` | Engenharia e pipeline da CLI Python `oreilly-dl` (`oreilly-epub-downloader`): `click`/`rich`, fast-path direto, validação JWT (`orm-jwt`), scraping resiliente IPv4/Firefox UA, download concorrente (`httpx`/`asyncio`), higienização XHTML e empacotamento EPUB 3.0 (`ebooklib`). |
+| **`agent-python`** | `~/.gemini/agents/agent-python/AGENT.md` | `python` | `agent-dev-base` | Engenharia Python 3.11+ moderna: empacotamento PEP 517/621 (`hatchling`/`uv`/`venv`), CLIs (`click`/`rich`), HTTP/scraping resiliente (`httpx` IPv4/WAF, `beautifulsoup4`, `lxml`), geração de EPUB (`ebooklib`) e arquitetura Ports & Adapters. |
+| **`agent-qa`** | `~/.gemini/agents/agent-qa/AGENT.md` | `qa` | `agent-dev-base` | Quality Gate adversarial independente: fuzzing, *chaos engineering*, BVA, simulação de falhas de I/O/concorrência, auditoria estrita de invariantes (zero comentários, linters, `audit` de CVEs), Local CI Gate 1:1 pré-commit (`.github/workflows/*.yml`), validação E2E e benchmarks/stress testing. |
+| **`agent-react-ts`** | `~/.gemini/agents/agent-react-ts/AGENT.md` | `react-ts` | `agent-dev-base` | Engenharia SPA moderna: React 19+, TypeScript estrito (`strict: true`, zero `any`), Vite, Tailwind CSS v4, `@xyflow/react`, Markdown anti-XSS (AST React / `DOMPurify`), polling/streaming com `AbortController`, auth `HttpOnly`/`SameSite=Strict` (zero segredos em `localStorage`) e WCAG 2.1 AA. |
+| **`agent-rust`** | `~/.gemini/agents/agent-rust/AGENT.md` | `rust` | `agent-dev-base` | Engenharia Rust 2024/2021 de alta performance: Ports & Adapters, borrow checker, runtime Tokio (concorrência/semáforos), tratamento explícito `Result`/`Option` (zero panics), `clap`, `reqwest`, streaming ZIP/EPUB e persistência `rusqlite`. |
+| **`agent-ts-mcp`** | `~/.gemini/agents/agent-ts-mcp/AGENT.md` | `ts-mcp` | `agent-dev-base` | Engenharia TypeScript/Node.js moderna: servidores e clientes Model Context Protocol (MCP), CLIs, ferramentas de análise (REA), contratos JSON Schema, álgebra `Result`, proveniência de evidências e arquitetura Ports & Adapters. |
+| **`agent-web`** | `~/.gemini/agents/agent-web/AGENT.md` | `web` | `agent-dev-base` | Engenharia Web Frontend moderna e aplicações estáticas: HTML5 semântico, CSS3 responsivo (Flexbox/Grid/`sticky`), Vanilla JS ES6+/ES Modules, Web APIs, a11y, Core Web Vitals, GitHub Pages e uso da skill `modern-web-guidance`. |
+
+### 8.2. Modo 1: Criação Automática via Revisão de Fim de Conversa & Sugestão Proativa
+1. Você solicita tarefas envolvendo um novo domínio/stack/workflow recorrente, ferramenta especializada, ou que sobrecarregam um especialista existente (com ou sem fallback para `agent-default`; exemplos ilustrativos: otimizar queries em PostgreSQL, criar um serviço em Rust ou configurar manifests Kubernetes).
+2. Ao final da conversa/entrega, o `orchestrator` analisa todo o contexto e, quando compensar, apresenta a **Sugestão Proativa de Especialista** propondo estruturadamente a criação dos plugins recomendados (Nome, Caminho, Herança `EXTENDS`, Escopo/Invariantes, Namespace L2 e justificativa do benefício). Quando não compensar, não força sugestão artificial.
 3. Ao receber seu *"Sim / Pode criar"*, o `orchestrator` delega ao `agent-default` a criação de `~/.gemini/agents/agent-<domain>/AGENT.md`, inicializa o namespace `<domain>` no L2 e registra o novo ponteiro no `Semantic Directory` de `CORE.md` (validando `mem check-core`).
 
 ### 8.3. Modo 2: Criação Manual Passo a Passo (Padrão Schema L2 v3)
@@ -588,23 +640,20 @@ Todos os comandos abaixo refletem exatamente a especificação implementada em `
 
 ## 10. Suíte de Testes Automatizados
 
-O motor L2 conta com uma suíte rigorosa de **32 testes automatizados** em [`~/.gemini/memory/tests/test_mem.py`](memory/tests/test_mem.py) construída sobre o módulo padrão `unittest` (carregando o executável `mem` dinamicamente via `importlib.machinery.SourceFileLoader`).
+O ecossistema conta com suítes automatizadas construídas sobre o módulo padrão `unittest` (sem dependências externas):
 
 ### 10.1. Como Executar os Testes
 ```bash
+# Suítes do motor L2 e paridade de catálogo
 python3 -m unittest discover -s ~/.gemini/memory/tests/ -v
 ```
 
-### 10.2. Cobertura Detalhada das 5 Suítes (`test_mem.py`)
+* **`GEMINI_README_PATH` (opcional):** Sobrescreve o caminho do `README.md` na suíte [`test_catalog_parity.py`](memory/tests/test_catalog_parity.py). Quando não definida e o arquivo padrão `~/.gemini/README.md` estiver oculto por isolamento de sandbox, os checks específicos de `README.md` fazem `skip` gracioso mantendo a verificação de paridade entre `agents/` e `agent-dev-base`.
 
-| Classe de Teste (`unittest.TestCase`) | Qtd. | Escopo & Invariantes Verificados |
-| :--- | :---: | :--- |
-| **`TestDomainPolicy`** | **11** | Validação de regex para namespaces (`<domain>` e `proj:<name>`), validação de `VALID_KINDS` (`fact`, `learning`, `behavior`, `decision`, `invariant`, `playbook`), limites de `confidence` ($[0.0, 1.0]$), regras de `parse_ttl` (incluindo TTL default de 30d para `fact` e preservação em `verify`), leitura de `ANTIGRAVITY_CORE_MAX_LINES`, expansão de sinônimos FTS5, filtro `MIN_TOKEN_LENGTH = 2` (ignorando tokens de 1 caractere sem aspas e preservando `"a"` entre aspas) e tokenização `build_error_fts_query` (CamelCase + stopwords). |
-| **`TestMarkdownWikiAdapter`** | **3** | Parsing resiliente de arrays inline (`["REL -> a:b"]`), blocos multilinhas YAML (`\|` e `>`) e frontmatter completo contendo dois-pontos (`:`) dentro de valores, tags, `version`, `source`, `confidence` e `links`. |
-| **`TestSqliteRepositorySchemaV3`** | **10** | Inicialização limpa do Schema v3 (`PRAGMA user_version = 3` e `schema_migrations` com versões 1, 2 e 3); migração in-place **v2 $\rightarrow$ v3** e **v1 $\rightarrow$ v3** sem perda de dados (habilitando `kind='playbook'` e reconstruindo o FTS5); validação completa das **5 transições da máquina de estados dos triggers FTS5** com soft-delete e reativação sem `SQLITE_CORRUPT`; preservação de histórico em `bulk_import` (`import-md`); versionamento automático e snapshots em `memory_history`; ciclo `soft-delete` $\rightarrow$ `restore` e `hard-delete` (`--hard`); ponderação do ranking BM25 por `confidence` (`score(conf=1.0) > 2 * score(conf=0.2)`); e integridade de `hot_backup`. |
-| **`TestControllerAndCliJson`** | **6** | Saída JSON e métricas de densidade (`line_count`, `word_count`, `byte_count`, `estimated_tokens`) em `check-core --json`; serialização de metadados v3 em `list --json` e `stats --json`; tratamento limpo de erros em subprocesso CLI sem expor `Traceback` (texto e `--json`); garantia de `exit code 1` quando `CORE.md` ultrapassa o limite de 60 linhas; e **teste de contrato da invariante `test_core_template_sync_invariant`** garantindo paridade 1:1 entre `CORE.template.md` e `DEFAULT_CORE_TEMPLATE` em `memory/mem`. |
-| **`TestConcurrencyAndStress`** | **2** | **Stress Test Multiprocesso SQLite WAL:** 8 processos workers simultâneos executando 5 iterações cada (40 escritas concorrentes em tópicos distintos + 40 atualizações disputando o mesmo tópico compartilhado `shared-contended-topic`), validando exit code `0` em todos os workers, `PRAGMA integrity_check == 'ok'`, `version == 40`, `39` snapshots em `memory_history` e consistência exata do índice `memories_fts`.<br/>**Exclusão Mútua de `file_lock`:** 8 processos concorrentes incrementando um arquivo contador físico com atraso induzido sob `file_lock`, comprovando ausência total de *lost updates* (`final_count == 40`). |
-| **Total Geral** | **32** | **100% de aprovação em execução isolada via `tempfile`** |
+### 10.2. Cobertura das Suítes (`test_mem.py` e `test_catalog_parity.py`)
+
+* **[`~/.gemini/memory/tests/test_mem.py`](memory/tests/test_mem.py) (21 testes):** Cobertura unitária, de componente, CLI `--json`/texto, BVA de orçamento (`59`/`60`/`61` linhas) e estresse concorrente SQLite WAL (`TestDomainPolicyUnit`, `TestMarkdownWikiAdapterUnit`, `TestSqliteRepositoryComponent`, `TestControllerAndCliIntegration`, `TestConcurrencyAndStress`).
+* **[`~/.gemini/memory/tests/test_catalog_parity.py`](memory/tests/test_catalog_parity.py) (10 testes):** Validação de resolução de `README.md` via `GEMINI_README_PATH` / `Path(__file__).resolve().parents[2]`, registro em `CORE.md`, listagem na Seção 8.1 do `README.md` e paridade bidirecional com `agent-dev-base/AGENT.md`.
 
 ---
 
@@ -635,5 +684,7 @@ Toda descrição de Pull Request (PR) deve estruturar obrigatoriamente **4 bloco
 
 ### 11.4. Diretrizes de Engenharia de Software & Segurança
 * **Clean Architecture & SOLID:** Todo código produzido ou refatorado pelos agentes deve respeitar separação estrita de responsabilidades (SRP), inversão de dependências via portas/protocolos (DIP), tipagem estrita e tratamento explícito de erros.
+* **Local CI Gate (Paridade e Simulação Local 1:1 de CI/CD Pré-Commit):** Sempre que um repositório possuir workflows em `.github/workflows/*.yml`, os agentes `agent-dev-base`, `agent-ci-cd` e `agent-qa` devem executar localmente todos os gates equivalentes aos steps do GitHub Actions antes de declarar `COMPLETED`: (1) `zizmor --persona=pedantic --min-severity=informational --min-confidence=low .github/workflows/` (0 findings e 0 suppressed) + checagem via API/git de SHA-40 em Git Tag imutável (nunca em branch, evitando `stale-action-refs` exit code 13) e ausência de runtime Node.js depreciado (ex.: Node.js 20); (2) `actionlint` em `.github/workflows/*.yml`; e (3) execução real local dos linters, testes, *smoke tests*, scanners SCA e blocos `run:` de instalação/verificação (`sha256sum -c`) com as mesmas flags estritas do CI.
+* **Versionamento SemVer (Manifesto SSOT + Tag `vX.Y.Z` + Auditoria Pré-Commit):** Em toda alteração funcional/fix/breaking de projeto, os agentes avaliam o impacto semântico (`MAJOR`/`MINOR`/`PATCH`) e atualizam o manifesto SSOT (+ lockfile) mantendo `--version` ligado ao manifesto; ao gerar mensagens de commit, o `agent-git` audita obrigatoriamente o manifesto SSOT frente ao diff e às tags existentes (`commit-semver-audit`), alertando explicitamente o usuário sobre bumps pendentes (`atual -> sugerida`, tag `vX.Y.Z`) e oferecendo aplicá-los automaticamente antes do commit. Workflows de Release disparam por padrão no push da branch principal + tag SemVer com checagem estrita de paridade ao manifesto, sem nunca executar `git commit`/`git tag`/`git push` autônomos.
 * **Preservação de Integridade Documental:** Comentários arquiteturais relevantes (como a explicação da máquina de estados dos triggers FTS5 em `memory/mem`) e docstrings existentes jamais devem ser removidos silenciosamente.
 * **Proteção contra Vazamento de Identidade (SSOT):** Antes de qualquer preparação de commit no Starter Kit (`~/.gemini`), verifique via `git status` e `git diff` que nenhum dado pessoal de `CORE.md` ou `archival.db` foi introduzido nos arquivos versionados.

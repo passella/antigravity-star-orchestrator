@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Antigravity Tier-2 Archival & Cognitive Memory Engine.
-Refactored with Clean Architecture (Ports & Adapters), SOLID principles,
-Concurrency-safe SQLite WAL + busy_timeout, Cross-Platform File Locking,
-Normalized FTS5 BM25 Ranking, Schema L2 v3 (Versioning, Provenance & Soft-Delete),
-and Resilient Markdown Wiki Interoperability.
-"""
+
 import argparse
 import contextlib
 import hashlib
@@ -15,25 +9,25 @@ import re
 import sqlite3
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Iterator, Protocol, Sequence
 
 try:
     import fcntl
 except ImportError:
-    fcntl = None  # type: ignore[assignment]
+    fcntl = None
 
 try:
     import msvcrt
 except ImportError:
-    msvcrt = None  # type: ignore[assignment]
+    msvcrt = None
 
 SCHEMA_VERSION = 3
 DEFAULT_CORE_MAX_LINES = 60
 MIN_TOKEN_LENGTH = 2
 VALID_KINDS = ("fact", "learning", "behavior", "decision", "invariant", "playbook")
 
-DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — Hot In-Context Cache)
+DEFAULT_CORE_TEMPLATE = r"""# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — Hot In-Context Cache)
 > **Orçamento Estrito:** `<= 60` linhas (validado por `~/.gemini/memory/mem check-core`). Conhecimento detalhado reside no L2 (`archival.db`).
 
 ## 👤 1. Perfil & Invariantes Globais do Usuário (SSOT de Identidade)
@@ -43,10 +37,14 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
 - **Invariantes Operacionais:**
   1. **Lei Zero (Zero Assumptions):** NUNCA assumir decisões de negócio, arquitetura, contratos ou escopo. Delegar ao usuário com opções e recomendação técnica clara.
   2. **Git Seguro:** Proibição absoluta de `git commit` ou `git push` sem autorização prévia e expressa do usuário no turno.
-  3. **Topologia Estrela + DAG Fan-Out & Zero Project I/O:** Decomposição atômica máxima, disparo paralelo, Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`) e Zero Project I/O no `orchestrator` (apenas `CORE.md` permitido; todo *Discovery* delegado a `flash_lite`).
+  3. **Topologia Estrela + DAG Fan-Out, Auto-Failover de Cota & Zero Project I/O:** Decomposição atômica máxima, disparo paralelo, Auto-Model Routing (`flash_lite`, `flash`, `pro`, `inherit`) com failover automático entre tiers/famílias de cota separada em caso de `429 RESOURCE_EXHAUSTED` (retomando a tarefa sem interromper o fluxo) e Zero Project I/O no `orchestrator` (apenas `CORE.md` permitido; todo *Discovery* delegado a `flash_lite`).
   4. **Single-Writer & M2M Telegráfico:** Zero ruído entre máquinas; apenas o `orchestrator` edita `CORE.md` no Fan-In (sincronia 1:1 obrigatória com `CORE.template.md`). Subagentes gravam em L2 (`mem`) e reportam deltas.
-  5. **Sugestão Proativa de Especialista (Calibrada):** Em todo fallback para `agent-default` em domínio especializado recorrente, propor novo `agent-<domain>`.
-  6. **Engenharia & Anti-Amnésia:** Rigor SOLID / Ports & Adapters; dump físico obrigatório para saídas volumosas.
+  5. **Evolução Contínua de Especialistas (Revisão de Fim de Conversa):** Ao final de toda conversa/entrega, analisar todo o contexto para avaliar se compensa criar novos agentes especialistas (mesmo sem fallback) e sugerir estruturadamente os recomendados ao usuário.
+  6. **Anti-Amnésia & Persistência Integral:** Proibido truncar saídas longas no chat; dump físico obrigatório para saídas volumosas.
+  7. **Auto-Persistência & Portabilidade Host-Agnostic:** Toda correção ou preferência informada pelo usuário deve ser persistida AUTOMÁTICA e IMEDIATAMENTE no L2 (`mem`) e nos `AGENT.md`/regras; artefatos estáticos são 100% agnósticos de distro/host/caminhos locais.
+  8. **Pipeline Universal de Qualidade (`dev <-> qa / appsec / ci-cd`):** Toda alteração feita por agente de dev (`agent-dev-base`, exceto `qa`/`appsec`/`ci-cd`) DEVE encerrar emitindo `STATUS: NEED` (`target_domain: ["qa", "appsec", "ci-cd"]`); sempre que `agent-qa`, `agent-appsec` ou `agent-ci-cd` encontrar qualquer achado/falha/vulnerabilidade/warning de CI, DEVE emitir `STATUS: NEED` (`target_domain: "<dev-stack>"` ou `"ci-cd"`) para o agente dev adequado corrigir o código, repetindo até todos os três (`qa`, `appsec` e `ci-cd`) aprovarem com `STATUS: COMPLETED` (dispensado apenas em consultas read-only, commits ou ajustes textuais triviais sem código).
+  9. **Controle Obrigatório de Versionamento SemVer (`MAJOR.MINOR.PATCH`):** Em qualquer projeto, toda alteração funcional/fix/breaking DEVE atualizar automaticamente o manifesto SSOT (+ lockfile e `--version` ligado ao manifesto) e informar a tag `vX.Y.Z` sugerida (sem `git commit`/`tag`/`push` autônomo); pipelines de release adotam por padrão trigger por tag SemVer + paridade com manifesto (`global/semver-versioning-ownership`).
+  10. **Sincronia Obrigatória de Documentação (Doc-Sync Gate):** SEMPRE que houver alteração de código em qualquer projeto, o agente de dev DEVE verificar se as documentações (`README.md` + traduções i18n `README.{en,es,zh-CN}.md`, `docs/`, `CHANGELOG.md`, guias/schemas) precisam ser atualizadas e aplicá-las no mesmo turno antes do handoff para `qa`/`appsec` (auditado por `agent-qa`).
 
 ## 🗺️ 2. Ambiente Ativo & Caminhos-Chave
 - **Workspace Padrão:** {{DEFAULT_WORKSPACE}}
@@ -55,10 +53,7 @@ DEFAULT_CORE_TEMPLATE = """# 🧠 Antigravity Tier-1 Core Memory (`CORE.md` — 
 
 ## 🧭 3. Semantic Directory (Ponteiros L2 & Plugins Especialistas)
 > *Consulte L2 (`~/.gemini/memory/mem search "<termo>" [--ns <dominio>]`) apenas quando a subtarefa envolver os tópicos abaixo:*
-- **`global` / `orchestrator`:** `user-profile`, `agent-memory-architecture`, `dag-parallel-model-orchestration`, `orchestrator-zero-project-io`, `zero-assumptions-mandatory-delegation`, `no-autonomous-git-commit-push`, `clean-greeting-no-boot-status`, `proactive-specialist-suggestion`, `core-template-sync-invariant`.
-- **`default`** (`~/.gemini/agents/agent-default/AGENT.md`): Fallback generalista (Shell, Linux, Python/scripts, Web Search, Bootstrap).
-<!-- Especialistas: - **<domain>** (~/.gemini/agents/agent-<domain>/AGENT.md): Resumo de invariantes -->
-<!-- Projetos: - **proj:<name>**: Tópicos indexados em L2 -->
+- **`global`**: Arquitetura, invariantes do ecossistema e decisões globais no L2 (`archival.db`).
 """
 
 DOMAIN_NAMESPACE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -90,18 +85,11 @@ DEFAULT_SYNONYM_GROUPS: Sequence[frozenset[str]] = (
     frozenset({"jit", "c2", "graalvm"}),
 )
 
-
-# ============================================================================
-# 1. DOMAIN EXCEPTIONS & VALUE OBJECTS / ENTITIES
-# ============================================================================
-
 class DomainValidationError(Exception):
-    """Raised when domain invariants or input constraints are violated."""
-
+        pass
 
 class ResourceNotFoundError(Exception):
-    """Raised when a requested memory record or path does not exist."""
-
+        pass
 
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
@@ -121,7 +109,6 @@ class MemoryRecord:
     deleted_at: str | None = None
     score: float = 0.0
 
-
 @dataclass(frozen=True, slots=True)
 class MemoryHistoryRecord:
     id: int
@@ -136,14 +123,12 @@ class MemoryHistoryRecord:
     confidence: float
     archived_at: str
 
-
 @dataclass(frozen=True, slots=True)
 class SemanticEdge:
     relation: str
     namespace: str
     topic: str
-    direction: str  # 'out' or 'in'
-
+    direction: str
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveTask:
@@ -155,14 +140,12 @@ class ProspectiveTask:
     created_at: str
     completed_at: str | None = None
 
-
 @dataclass(frozen=True, slots=True)
 class NamespaceStat:
     namespace: str
     count: int
     hits: int
     total_bytes: int
-
 
 @dataclass(frozen=True, slots=True)
 class StorageStats:
@@ -176,7 +159,6 @@ class StorageStats:
     soft_deleted_count: int
     history_versions_count: int
     top_records: Sequence[MemoryRecord]
-
 
 @dataclass(slots=True)
 class WikiDocument:
@@ -194,16 +176,10 @@ class WikiDocument:
     links: list[str] = field(default_factory=list)
     body: str = ""
 
-
-# ============================================================================
-# 2. ARCHITECTURAL PORTS (INTERFACES)
-# ============================================================================
-
 class ClockPort(Protocol):
     def now_iso(self) -> str: ...
     def now_dt(self) -> datetime: ...
     def parse_iso(self, dt_str: str) -> datetime: ...
-
 
 class MemoryRepositoryPort(Protocol):
     def initialize(self, foundational_records: Sequence[tuple[str, str, str, str, str]], ts: str) -> None: ...
@@ -238,12 +214,88 @@ class MemoryRepositoryPort(Protocol):
     def bulk_import(self, docs: Sequence[WikiDocument], default_ts: str) -> tuple[int, int]: ...
     def compute_stats(self, stale_checker: Callable[[str, int | None], str | None]) -> StorageStats: ...
 
+    def check_integrity(self) -> tuple[bool, str]: ...
 
-# ============================================================================
-# 3. PURE DOMAIN POLICIES & SERVICES
-# ============================================================================
+    def purge_garbage(self, days: int | None = None, force: bool = False, ts: str = "") -> tuple[int, int, int, int]: ...
 
 class DomainPolicy:
+
+    @staticmethod
+    def check_structural_parity(core_content: str, template_content: str, default_template: str) -> tuple[bool, list[str]]:
+        errors: list[str] = []
+        tpl_lines = template_content.splitlines()
+        def_lines = default_template.splitlines()
+        if len(tpl_lines) != len(def_lines):
+            errors.append(f"Line count mismatch between CORE.template.md ({len(tpl_lines)}) and DEFAULT_CORE_TEMPLATE ({len(def_lines)})")
+        if template_content.strip() != default_template.strip():
+            errors.append("Content mismatch between CORE.template.md and DEFAULT_CORE_TEMPLATE")
+        tpl_headers = [line.strip() for line in tpl_lines if line.startswith("## ")]
+        def_headers = [line.strip() for line in def_lines if line.startswith("## ")]
+        if tpl_headers != def_headers:
+            errors.append(f"Structural header mismatch between CORE.template.md ({tpl_headers}) and DEFAULT_CORE_TEMPLATE ({def_headers})")
+        core_headers = [line.strip() for line in core_content.splitlines() if line.startswith("## ")]
+        if core_headers != tpl_headers:
+            errors.append(f"Structural header mismatch between CORE.md ({core_headers}) and CORE.template.md ({tpl_headers})")
+        if core_headers != def_headers:
+            errors.append(f"Structural header mismatch between CORE.md ({core_headers}) and DEFAULT_CORE_TEMPLATE ({def_headers})")
+
+        core_lines = core_content.splitlines()
+        in_semantic = False
+        core_base_lines: list[str] = []
+        agent_dir_pattern = "agents/" + "agent-"
+        for line in core_lines:
+            stripped = line.strip()
+            if re.match(r"^\s*-\s*\*\*`?proj:", line):
+                continue
+            if stripped.startswith("## 🧭 3. Semantic Directory") or stripped.startswith("## Semantic Directory"):
+                in_semantic = True
+                core_base_lines.append(line)
+                continue
+            if stripped.startswith("## ") and in_semantic:
+                in_semantic = False
+            if in_semantic:
+                if agent_dir_pattern in line:
+                    continue
+                if re.match(r"^\s*-\s*\*\*`?(?!global\b)[a-zA-Z0-9_-]+`?\*\*", line):
+                    continue
+                if line.startswith("<!-- Especialistas:") or line.startswith("<!-- Projetos:"):
+                    continue
+            core_base_lines.append(line)
+
+        tpl_base_lines = [
+            line for line in tpl_lines
+            if not line.startswith("<!-- Especialistas:") and not line.startswith("<!-- Projetos:")
+        ]
+        def_base_lines = [
+            line for line in def_lines
+            if not line.startswith("<!-- Especialistas:") and not line.startswith("<!-- Projetos:")
+        ]
+        if len(core_base_lines) != len(tpl_base_lines):
+            errors.append(f"Line count mismatch between base CORE.md ({len(core_base_lines)}) and CORE.template.md ({len(tpl_base_lines)})")
+        if len(core_base_lines) != len(def_base_lines):
+            errors.append(f"Line count mismatch between base CORE.md ({len(core_base_lines)}) and DEFAULT_CORE_TEMPLATE ({len(def_base_lines)})")
+        return (len(errors) == 0, errors)
+
+    @staticmethod
+    def check_agents_registered(core_content: str, agents_dir: str) -> tuple[list[str], list[str]]:
+        if not os.path.isdir(agents_dir):
+            return ([], [])
+        missing: list[str] = []
+        present: list[str] = []
+        for item in sorted(os.listdir(agents_dir)):
+            agent_path = os.path.join(agents_dir, item, "AGENT.md")
+            if os.path.isfile(agent_path) and item.startswith("agent-"):
+                if item == "agent-" + "dev-base":
+                    continue
+                clean_name = item.removeprefix("agent-")
+                pattern1 = f"agents/{item}/AGENT.md"
+                pattern2 = f"**`{clean_name}`**"
+                pattern3 = f"**`{item}`**"
+                if pattern1 in core_content or pattern2 in core_content or pattern3 in core_content:
+                    present.append(item)
+                else:
+                    missing.append(item)
+        return (missing, present)
     @staticmethod
     def get_core_max_lines() -> int:
         env_val = os.environ.get("ANTIGRAVITY_CORE_MAX_LINES")
@@ -407,11 +459,6 @@ class DomainPolicy:
             return f"tags: {tags}"
         return "L2 record"
 
-
-# ============================================================================
-# 4. DRIVEN ADAPTERS (INFRASTRUCTURE: CLOCK, FILE LOCK, SQLITE, MARKDOWN WIKI)
-# ============================================================================
-
 @contextlib.contextmanager
 def file_lock(lock_path: str) -> Iterator[None]:
     os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
@@ -437,7 +484,6 @@ def file_lock(lock_path: str) -> Iterator[None]:
                 except OSError:
                     pass
 
-
 @contextlib.contextmanager
 def immediate_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     is_outer = not conn.in_transaction
@@ -451,7 +497,6 @@ def immediate_transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connecti
         if is_outer and conn.in_transaction:
             conn.execute("ROLLBACK;")
         raise
-
 
 class UtcClockAdapter:
     def now_iso(self) -> str:
@@ -472,7 +517,6 @@ class UtcClockAdapter:
         except Exception:
             return self.now_dt()
 
-
 class SqliteMemoryRepository:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
@@ -484,6 +528,7 @@ class SqliteMemoryRepository:
         os.makedirs(os.path.dirname(os.path.abspath(self._db_path)), exist_ok=True)
         conn = sqlite3.connect(self._db_path, timeout=30.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA auto_vacuum=INCREMENTAL;")
         conn.execute("PRAGMA busy_timeout=30000;")
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
@@ -504,7 +549,6 @@ class SqliteMemoryRepository:
         with immediate_transaction(conn):
             ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            # 1. Formal schema_migrations tracking table
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -515,7 +559,6 @@ class SqliteMemoryRepository:
                 """
             )
 
-            # 2. Memories table setup or migration
             row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'").fetchone()
             if row is None:
                 ddl_initial = [
@@ -564,11 +607,6 @@ class SqliteMemoryRepository:
                     END
                     """,
                     """
-                    -- FTS5 External Content State Machine Guard:
-                    -- Em tabelas FTS5 external content (content='memories'), o comando 'delete' NAO e idempotente.
-                    -- Executar 'delete' para um rowid ja removido em soft-delete corrompe a B-Tree invertida do FTS5
-                    -- com SQLITE_CORRUPT ('database disk image is malformed').
-                    -- Portanto, 'WHERE old.deleted_at IS NULL' e uma guarda de estado estritamente obrigatoria.
                     CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
@@ -639,7 +677,6 @@ class SqliteMemoryRepository:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_ns_hits ON memories(namespace, access_count DESC, updated_at DESC);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);")
 
-                # Replace triggers with soft-delete-aware triggers and rebuild FTS5 index
                 trigger_stmts = [
                     "DROP TRIGGER IF EXISTS memories_ai",
                     "DROP TRIGGER IF EXISTS memories_ad",
@@ -657,11 +694,6 @@ class SqliteMemoryRepository:
                     END
                     """,
                     """
-                    -- FTS5 External Content State Machine Guard:
-                    -- Em tabelas FTS5 external content (content='memories'), o comando 'delete' NAO e idempotente.
-                    -- Executar 'delete' para um rowid ja removido em soft-delete corrompe a B-Tree invertida do FTS5
-                    -- com SQLITE_CORRUPT ('database disk image is malformed').
-                    -- Portanto, 'WHERE old.deleted_at IS NULL' e uma guarda de estado estritamente obrigatoria.
                     CREATE TRIGGER memories_au AFTER UPDATE OF topic, content, tags, namespace, deleted_at ON memories BEGIN
                         INSERT INTO memories_fts(memories_fts, rowid, topic, content, tags, namespace)
                         SELECT 'delete', old.id, old.topic, old.content, old.tags, old.namespace
@@ -677,7 +709,6 @@ class SqliteMemoryRepository:
                 for stmt in trigger_stmts:
                     conn.execute(stmt)
 
-            # 3. Memory history table and auxiliary structures
             auxiliary_ddl = [
                 """
                 CREATE TABLE IF NOT EXISTS memory_history (
@@ -732,7 +763,6 @@ class SqliteMemoryRepository:
             for stmt in auxiliary_ddl:
                 conn.execute(stmt)
 
-            # 4. Populate default synonyms if empty
             syn_count = conn.execute("SELECT COUNT(*) FROM synonyms").fetchone()[0]
             if syn_count == 0:
                 for group in DEFAULT_SYNONYM_GROUPS:
@@ -744,7 +774,6 @@ class SqliteMemoryRepository:
                             (term, expanded),
                         )
 
-            # 5. Populate formal migrations log
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations (version, applied_at, description) VALUES (1, ?, ?)",
                 (ts, "Initial L2 schema (memories, FTS5)"),
@@ -822,7 +851,6 @@ class SqliteMemoryRepository:
                     (namespace, kind, topic, content, tags, ttl_days, source, confidence, ts, ts),
                 )
             else:
-                # Archive previous active/soft-deleted state into memory_history
                 conn.execute(
                     """
                     INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
@@ -941,9 +969,6 @@ class SqliteMemoryRepository:
 
     def search_fts(self, fts_query: str, namespace: str | None, limit: int, prioritize_episodic: bool = False) -> Sequence[MemoryRecord]:
         conn = self._get_conn()
-        # memories_fts columns: topic (5.0), content (1.0), tags (3.0), namespace (0.5)
-        # Multiply relevance by m.confidence to score higher-confidence memories accordingly.
-        # Filter strictly for deleted_at IS NULL.
         sql = """
             SELECT m.id, m.namespace, m.kind, m.topic, m.content, m.tags, m.access_count, m.ttl_days, m.created_at, m.updated_at,
                    m.version, m.source, m.confidence, m.deleted_at,
@@ -1022,9 +1047,8 @@ class SqliteMemoryRepository:
                 return True
             else:
                 if existing["deleted_at"] is not None:
-                    return False  # Already soft-deleted
+                    return False
 
-                # Archive version before soft-delete
                 conn.execute(
                     """
                     INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
@@ -1261,7 +1285,6 @@ class SqliteMemoryRepository:
                         (d.namespace, d.kind, d.topic, d.body, d.tags, d.access_count, d.ttl_days, d.version, d.source, d.confidence, c_at, u_at),
                     )
                 else:
-                    # Archive snapshot before overwriting
                     conn.execute(
                         """
                         INSERT INTO memory_history (memory_id, namespace, kind, topic, content, tags, version, source, confidence, archived_at)
@@ -1373,6 +1396,45 @@ class SqliteMemoryRepository:
             top_records=top_records,
         )
 
+    def check_integrity(self) -> tuple[bool, str]:
+        conn = self._get_conn()
+        row = conn.execute("PRAGMA integrity_check;").fetchone()
+        if not row or row[0] != "ok":
+            return (False, f"SQLite integrity check failed: {row[0] if row else 'empty'}")
+        try:
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check');")
+        except sqlite3.Error as exc:
+            return (False, f"FTS5 integrity check failed: {exc}")
+        return (True, "ok")
+
+    def purge_garbage(self, days: int | None = None, force: bool = False, ts: str = "") -> tuple[int, int, int, int]:
+        conn = self._get_conn()
+        with immediate_transaction(conn):
+            if days is not None and days > 0:
+                base_dt = datetime.fromisoformat(ts) if ts else datetime.now(timezone.utc)
+                cutoff = (base_dt - timedelta(days=days)).isoformat()
+                cur = conn.execute("SELECT id FROM memories WHERE deleted_at IS NOT NULL AND deleted_at <= ?", (cutoff,))
+            else:
+                cur = conn.execute("SELECT id FROM memories WHERE deleted_at IS NOT NULL")
+            record_ids = [row[0] for row in cur.fetchall()]
+            purged_records = len(record_ids)
+            if record_ids:
+                ph = ",".join("?" for _ in record_ids)
+                conn.execute(f"DELETE FROM memory_history WHERE memory_id IN ({ph})", record_ids)
+                conn.execute(f"DELETE FROM memory_edges WHERE source_id IN ({ph}) OR target_id IN ({ph})", record_ids + record_ids)
+                conn.execute(f"DELETE FROM memories WHERE id IN ({ph})", record_ids)
+            cur_hist = conn.execute("DELETE FROM memory_history WHERE memory_id NOT IN (SELECT id FROM memories)")
+            purged_history = cur_hist.rowcount
+            cur_edges = conn.execute("DELETE FROM memory_edges WHERE source_id NOT IN (SELECT id FROM memories) OR target_id NOT IN (SELECT id FROM memories)")
+            purged_edges = cur_edges.rowcount
+            conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('optimize');")
+        freelist_before = conn.execute("PRAGMA freelist_count;").fetchone()[0]
+        freelist_reclaimed = 0
+        if force or freelist_before > 50:
+            conn.execute("PRAGMA incremental_vacuum;")
+            freelist_after = conn.execute("PRAGMA freelist_count;").fetchone()[0]
+            freelist_reclaimed = max(0, freelist_before - freelist_after)
+        return (purged_records, purged_history, purged_edges, freelist_reclaimed)
 
 class MarkdownWikiAdapter:
     @staticmethod
@@ -1712,11 +1774,6 @@ class MarkdownWikiAdapter:
 
         return docs, warnings
 
-
-# ============================================================================
-# 5. DRIVING ADAPTER (APPLICATION CONTROLLER & CLI)
-# ============================================================================
-
 class MemoryEngineController:
     def __init__(
         self,
@@ -1798,7 +1855,7 @@ class MemoryEngineController:
                 "global",
                 "invariant",
                 "proactive-specialist-suggestion",
-                "Invariante Obrigatória de Sugestão Proativa de Especialista: SEMPRE (sem exceção) que o orchestrator receber uma tarefa ou assunto para o qual não exista um subagente especialista registrado no Semantic Directory de CORE.md (recorrendo ao fallback agent-default), o orchestrator DEVE obrigatoriamente sugerir ao usuário na própria resposta a criação do especialista dedicado (agent-<domain>), especificando nome, escopo, invariantes e namespace L2.",
+                "Invariante Obrigatória de Sugestão Proativa de Especialista: SEMPRE (sem exceção) que o orchestrator receber uma tarefa ou assunto para o qual não exista um subagente especialista registrado no Semantic Directory de CORE.md (recorrendo ao fallback generalista), o orchestrator DEVE obrigatoriamente sugerir ao usuário na própria resposta a criação do especialista dedicado (<domain>), especificando nome, escopo, invariantes e namespace L2.",
                 "orchestrator,specialist,plugin-registry,fallback,invariant,proactive",
             ),
             (
@@ -2283,26 +2340,101 @@ class MemoryEngineController:
                 print(stale_warn)
             print(r.content)
 
+    def cmd_gc(self, args: argparse.Namespace) -> None:
+        days = getattr(args, "days", None)
+        force = getattr(args, "force", False)
+        as_json = getattr(args, "json", False)
+        now_iso = self._clock.now_iso()
+        purged_records, purged_history, purged_edges, freelist_reclaimed = self._repo.purge_garbage(
+            days=days, force=force, ts=now_iso
+        )
+        if as_json:
+            payload = {
+                "status": "ok",
+                "purged_records": purged_records,
+                "purged_history": purged_history,
+                "purged_edges": purged_edges,
+                "freelist_reclaimed": freelist_reclaimed,
+                "days_threshold": days,
+                "force": force,
+                "timestamp": now_iso,
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            return
+        print("=== L2 Archival Garbage Collection ===")
+        print(f"Purged Soft-deleted Records: {purged_records}")
+        print(f"Purged Orphan History Entries: {purged_history}")
+        print(f"Purged Orphan Semantic Edges: {purged_edges}")
+        print(f"Freelist Pages Reclaimed: {freelist_reclaimed}")
+        if days is not None and days > 0:
+            print(f"Retention Filter: deleted > {days} days ago")
+        print("[OK] Garbage collection completed successfully.")
+
     def cmd_check_core(self, args: argparse.Namespace) -> None:
         max_lines = args.max_lines if getattr(args, "max_lines", None) is not None else DomainPolicy.get_core_max_lines()
-
         with file_lock(self._lock_path):
             if not os.path.exists(self._core_path):
                 raise ResourceNotFoundError(f"CORE.md not found at {self._core_path}")
             with open(self._core_path, "r", encoding="utf-8") as f:
                 content = f.read()
-
         lines = content.splitlines()
         line_count = len(lines)
         word_count = len(content.split())
         byte_count = len(content.encode("utf-8"))
         char_count = len(content)
         estimated_tokens = int(word_count * 1.33)
-
         exceeded = line_count > max_lines
-        status = "EXCEEDED" if exceeded else "OK"
+        errors: list[str] = []
+        if exceeded:
+            errors.append(f"Line count {line_count} exceeds limit of {max_lines}")
+
+        template_path = getattr(args, "template", None)
+        if not template_path:
+            default_tpl = os.path.join(os.path.dirname(self._core_path), "CORE.template.md")
+            if os.path.exists(default_tpl):
+                template_path = default_tpl
+
+        structural_parity_ok = True
+        parity_errors: list[str] = []
+        if template_path and os.path.exists(template_path):
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_content = f.read()
+            structural_parity_ok, parity_errors = DomainPolicy.check_structural_parity(
+                content, template_content, DEFAULT_CORE_TEMPLATE
+            )
+            if not structural_parity_ok:
+                errors.extend(parity_errors)
+
+        missing_agents: list[str] = []
+        skip_agents = getattr(args, "skip_agents_check", False)
+        if not skip_agents:
+            agents_dir = getattr(args, "agents_dir", None)
+            if not agents_dir:
+                candidates = [
+                    os.path.join(os.path.dirname(self._core_path), "..", "agents"),
+                    os.path.expanduser("~/.gemini/agents"),
+                ]
+                for c in candidates:
+                    if os.path.isdir(c):
+                        agents_dir = os.path.abspath(c)
+                        break
+            if agents_dir and os.path.isdir(agents_dir):
+                missing_agents, _ = DomainPolicy.check_agents_registered(content, agents_dir)
+                if missing_agents:
+                    for a in missing_agents:
+                        errors.append(f"Missing agent in CORE.md Semantic Directory: {a}")
+
+        db_ok = True
+        db_err = "ok"
+        skip_db = getattr(args, "skip_db_check", False)
+        if not skip_db and os.path.exists(self._db_path):
+            db_ok, db_err = self._repo.check_integrity()
+            if not db_ok:
+                errors.append(db_err)
+
+        due_tasks = self._repo.list_due_tasks(None) if os.path.exists(self._db_path) else []
         remaining = max_lines - line_count
-        due_tasks = self._repo.list_due_tasks(None)
+        status = "EXCEEDED" if exceeded else "FAILED" if errors else "OK"
 
         if getattr(args, "json", False):
             payload = {
@@ -2316,6 +2448,11 @@ class MemoryEngineController:
                 "estimated_tokens": estimated_tokens,
                 "exceeded": exceeded,
                 "path": self._core_path,
+                "structural_parity": structural_parity_ok,
+                "structural_parity_errors": parity_errors,
+                "missing_agents": missing_agents,
+                "db_integrity": db_ok,
+                "errors": errors,
                 "pending_tasks": [
                     {
                         "id": t.id,
@@ -2328,7 +2465,7 @@ class MemoryEngineController:
                 ],
             }
             print(json.dumps(payload, indent=2, ensure_ascii=False))
-            if exceeded:
+            if errors:
                 sys.exit(1)
             return
 
@@ -2336,15 +2473,19 @@ class MemoryEngineController:
         print(f"Status: {status} ({line_count}/{max_lines} lines used, {remaining} lines remaining)")
         print(f"Density: {word_count} words | {byte_count} bytes | ~{estimated_tokens} estimated tokens")
         print(f"Path: {self._core_path}")
-
+        print(f"Structural Parity: {'OK' if structural_parity_ok else 'FAILED'}")
+        print(f"Agents Registered: {'OK' if not missing_agents else 'FAILED (' + ', '.join(missing_agents) + ')'}")
+        print(f"DB & FTS5 Integrity: {'OK' if db_ok else 'FAILED (' + db_err + ')'}")
         print("\n=== Pending Prospective Tasks ===")
         if not due_tasks:
             print("(No pending prospective tasks)")
         else:
             for t in due_tasks:
                 print(f"- #{t.id} [{t.namespace}]: [{t.trigger_cond}] -> {t.action} (created: {t.created_at})")
-
-        if exceeded:
+        if errors:
+            print("\nErrors detected:")
+            for err in errors:
+                print(f"  - {err}")
             sys.exit(1)
 
     def cmd_export_md(self, args: argparse.Namespace) -> None:
@@ -2436,7 +2577,6 @@ class MemoryEngineController:
                 ttl_part = f" | ttl={t.ttl_days}d" if t.ttl_days is not None else ""
                 print(f"  * [{t.namespace}] {t.topic} (v{t.version} | {t.access_count} hits{ttl_part})")
         print("\nTip: Run 'mem promote' to generate ready-to-use markdown for CORE.md Semantic Directory.")
-
 
 def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     json_parent = argparse.ArgumentParser(add_help=False)
@@ -2549,8 +2689,17 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_recall.add_argument("--limit", type=int, default=5, help="Result limit (default: 5)")
     p_recall.set_defaults(func=controller.cmd_recall_error)
 
+    p_gc = sub.add_parser("gc", aliases=["prune"], parents=[json_parent], help="Purge soft-deleted and orphan records from archival.db")
+    p_gc.add_argument("--days", type=int, default=None, help="Retention threshold in days")
+    p_gc.add_argument("--force", action="store_true", help="Force purge all soft-deleted records without age filter")
+    p_gc.set_defaults(func=controller.cmd_gc)
+
     p_check = sub.add_parser("check-core", parents=[json_parent], help="Check CORE.md line count budget, density and pending prospective tasks")
     p_check.add_argument("--max-lines", type=int, default=None, help=f"Custom line budget (default: {DEFAULT_CORE_MAX_LINES} or $ANTIGRAVITY_CORE_MAX_LINES)")
+    p_check.add_argument("--template", type=str, default=None, help="Path to custom CORE.template.md")
+    p_check.add_argument("--agents-dir", type=str, default=None, help="Path to agents directory")
+    p_check.add_argument("--skip-agents-check", action="store_true", help="Skip agent registration check")
+    p_check.add_argument("--skip-db-check", action="store_true", help="Skip database integrity check")
     p_check.set_defaults(func=controller.cmd_check_core)
 
     p_export_md = sub.add_parser("export-md", help="Export archival memories to Markdown Wiki with YAML frontmatter")
@@ -2563,7 +2712,6 @@ def build_parser(controller: MemoryEngineController) -> argparse.ArgumentParser:
     p_import_md.set_defaults(func=controller.cmd_import_md)
 
     return parser
-
 
 def main() -> None:
     mem_dir = os.path.dirname(os.path.abspath(__file__))
@@ -2595,7 +2743,6 @@ def main() -> None:
         else:
             sys.stderr.write(f"Error: {exc}\n")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

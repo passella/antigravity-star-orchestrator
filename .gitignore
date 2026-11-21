@@ -6,6 +6,9 @@
 !.gitignore
 !GEMINI.md
 !README.md
+!README.en.md
+!README.es.md
+!README.zh-CN.md
 
 !agents/
 !agents/COMMON_INSTRUCTIONS.md
@@ -19,3 +22,5 @@
 !memory/CORE.template.md
 !memory/tests/
 !memory/tests/**
+memory/tests/__pycache__/
+memory/tests/*.py[cod]
